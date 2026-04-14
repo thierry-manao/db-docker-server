@@ -7,6 +7,9 @@ INSTANCES_DIR="$PROJECT_DIR/instances"
 SEED_DIR="$PROJECT_DIR/seed"
 TEMPLATE_PATH="$PROJECT_DIR/.env.example"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
+UI_PID_FILE="$PROJECT_DIR/.dbserver-ui.pid"
+UI_LOG_FILE="$PROJECT_DIR/.dbserver-ui.log"
+UI_AUTH_FILE="$PROJECT_DIR/.dbserver-ui.auth"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +23,8 @@ die() { red "ERROR: $*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 Usage: dbserver <instance> <command> [options]
+       dbserver list
+       dbserver ui <action> [options]
 
 Commands:
   init          Create a new DB instance
@@ -31,6 +36,7 @@ Commands:
   logs          Tail container logs
   shell         Open a shell in the DB container
   list          List all instances
+  ui            Manage the web UI (start|stop|status|restart)
 
 Options (init):
   --engine <mariadb|mysql|postgres>   DB engine (default: mariadb)
@@ -40,11 +46,18 @@ Options (init):
   --db <name>                         Database name to create
   --root-password <pw>                Root password (default: root)
 
+Options (ui):
+  --username <user>                   UI admin username (default: admin)
+  --password <pass>                   UI admin password (auto-generated if omitted)
+  <port>                              UI port (default: 9090)
+
 Examples:
   dbserver gescom init --engine mariadb --version 11 --db gescom
   dbserver gescom up
   dbserver gescom seed gescom.sql
   dbserver list
+  dbserver ui start
+  dbserver ui restart --password mypass 9090
 EOF
     exit 0
 }
@@ -101,6 +114,67 @@ get_db_container() {
     local name="$1"
     load_instance_env "$name"
     echo "dbserver_${name}-${DB_ENGINE:-mariadb}-1"
+}
+
+# ── UI helpers ───────────────────────────────────────────────────────────────
+
+is_ui_running() {
+    [[ ! -f "$UI_PID_FILE" ]] && return 1
+    local pid
+    pid="$(tr -d '[:space:]' < "$UI_PID_FILE")"
+    [[ -z "$pid" ]] && return 1
+    if kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$UI_PID_FILE"
+    return 1
+}
+
+generate_ui_password() {
+    local alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    local password=''
+    local alphabet_length=${#alphabet}
+    while [[ ${#password} -lt 24 ]]; do
+        local random_byte
+        random_byte="$(od -An -N1 -tu1 /dev/urandom | tr -d '[:space:]')"
+        password+="${alphabet:$(( random_byte % alphabet_length )):1}"
+    done
+    printf '%s' "$password"
+}
+
+write_ui_auth_file() {
+    local username="$1"
+    local password="$2"
+    cat > "$UI_AUTH_FILE" <<EOF
+DBSERVER_UI_USERNAME=$username
+DBSERVER_UI_PASSWORD=$password
+EOF
+}
+
+ensure_ui_auth_file() {
+    [[ -f "$UI_AUTH_FILE" ]] && return 0
+    local username="${DBSERVER_UI_USERNAME:-admin}"
+    local password="${DBSERVER_UI_PASSWORD:-}"
+    if [[ -z "$password" ]]; then
+        password="$(generate_ui_password)"
+    fi
+    write_ui_auth_file "$username" "$password"
+}
+
+load_ui_auth() {
+    local requested_username="${DBSERVER_UI_USERNAME:-}"
+    local requested_password="${DBSERVER_UI_PASSWORD:-}"
+    ensure_ui_auth_file
+    set -a
+    # shellcheck disable=SC1090
+    source "$UI_AUTH_FILE"
+    set +a
+    if [[ -n "$requested_username" ]]; then
+        DBSERVER_UI_USERNAME="$requested_username"
+    fi
+    if [[ -n "$requested_password" ]]; then
+        DBSERVER_UI_PASSWORD="$requested_password"
+    fi
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -418,13 +492,143 @@ cmd_list() {
     done
 }
 
+cmd_ui() {
+    local action="start"
+    local port="${DBSERVER_UI_PORT:-9090}"
+
+    if [[ $# -gt 0 ]]; then
+        case "$1" in
+            start|stop|status|restart)
+                action="$1"
+                shift
+                ;;
+        esac
+    fi
+
+    if [[ $# -gt 0 ]]; then
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --username)
+                    export DBSERVER_UI_USERNAME="$2"
+                    shift 2
+                    ;;
+                --password)
+                    export DBSERVER_UI_PASSWORD="$2"
+                    shift 2
+                    ;;
+                *)
+                    port="$1"
+                    shift
+                    ;;
+            esac
+        done
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        red "✗ Error: Node.js is required to run the web UI."
+        exit 1
+    fi
+
+    case "$action" in
+        start)
+            if is_ui_running; then
+                local current_pid
+                current_pid="$(tr -d '[:space:]' < "$UI_PID_FILE")"
+                yellow "⚠  dbserver web UI is already running (PID: ${current_pid})."
+                echo "   URL:  http://localhost:${port}"
+                echo "   Hint: dbserver ui restart"
+                echo "   Stop: dbserver ui stop"
+                return 0
+            fi
+
+            load_ui_auth
+
+            if [[ -n "${DBSERVER_UI_USERNAME:-}" && -n "${DBSERVER_UI_PASSWORD:-}" ]]; then
+                write_ui_auth_file "$DBSERVER_UI_USERNAME" "$DBSERVER_UI_PASSWORD"
+            fi
+
+            echo "Launching dbserver web UI in the background on http://localhost:${port}"
+            nohup env \
+                DBSERVER_UI_PORT="$port" \
+                DBSERVER_UI_USERNAME="$DBSERVER_UI_USERNAME" \
+                DBSERVER_UI_PASSWORD="$DBSERVER_UI_PASSWORD" \
+                node "$PROJECT_DIR/web-ui/server.js" > "$UI_LOG_FILE" 2>&1 &
+            local ui_pid=$!
+            echo "$ui_pid" > "$UI_PID_FILE"
+            sleep 1
+
+            if kill -0 "$ui_pid" 2>/dev/null; then
+                green "✅ Web UI started."
+                echo "   URL:  http://localhost:${port}"
+                echo "   PID:  ${ui_pid}"
+                echo "   Log:  $UI_LOG_FILE"
+                echo "   User: ${DBSERVER_UI_USERNAME}"
+                echo "   Pass: ${DBSERVER_UI_PASSWORD}"
+                echo "   Auth: $UI_AUTH_FILE"
+                echo "   Stop: dbserver ui stop"
+                return 0
+            fi
+
+            rm -f "$UI_PID_FILE"
+            red "✗ Failed to start the web UI."
+            [[ -f "$UI_LOG_FILE" ]] && tail -n 20 "$UI_LOG_FILE"
+            exit 1
+            ;;
+        stop)
+            if ! is_ui_running; then
+                yellow "⚠  dbserver web UI is not running."
+                return 0
+            fi
+
+            local ui_pid
+            ui_pid="$(tr -d '[:space:]' < "$UI_PID_FILE")"
+            kill "$ui_pid" 2>/dev/null || true
+            rm -f "$UI_PID_FILE"
+            green "✅ Web UI stopped."
+            ;;
+        restart)
+            if is_ui_running; then
+                local ui_pid
+                ui_pid="$(tr -d '[:space:]' < "$UI_PID_FILE")"
+                kill "$ui_pid" 2>/dev/null || true
+                rm -f "$UI_PID_FILE"
+                echo "↻ Restarting dbserver web UI..."
+            else
+                echo "Launching dbserver web UI..."
+            fi
+
+            cmd_ui start "$port" "$@"
+            ;;
+        status)
+            if is_ui_running; then
+                local ui_pid
+                ui_pid="$(tr -d '[:space:]' < "$UI_PID_FILE")"
+                load_ui_auth
+                green "✅ dbserver web UI is running."
+                echo "   PID: ${ui_pid}"
+                echo "   Log: $UI_LOG_FILE"
+                echo "   User: ${DBSERVER_UI_USERNAME}"
+                echo "   Auth: $UI_AUTH_FILE"
+            else
+                yellow "⚠  dbserver web UI is not running."
+            fi
+            ;;
+    esac
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 [[ $# -ge 1 ]] || usage
 
-# Special case: `dbserver list` has no instance name
+# Special cases without instance name: `dbserver list` and `dbserver ui`
 if [[ "$1" == "list" ]]; then
     cmd_list
+    exit 0
+fi
+
+if [[ "$1" == "ui" ]]; then
+    shift
+    cmd_ui "$@"
     exit 0
 fi
 

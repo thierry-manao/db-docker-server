@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
 const { execFile, execFileSync } = require('child_process');
 const { promisify } = require('util');
 
@@ -35,6 +36,11 @@ if (process.platform === 'win32') {
 console.log(`[dbserver-ui] Docker mode: ${USE_WSL ? 'WSL' : 'native'}`);
 
 const PORT = Number(process.argv[2]) || Number(process.env.DBSERVER_UI_PORT) || 9090;
+const AUTH_USERNAME = String(process.env.DBSERVER_UI_USERNAME || 'admin').trim();
+const AUTH_PASSWORD = String(process.env.DBSERVER_UI_PASSWORD || '').trim();
+const SESSION_COOKIE = 'dbserver_ui_session';
+const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const sessions = new Map();
 
 const MIME_TYPES = {
     '.css': 'text/css; charset=utf-8',
@@ -68,6 +74,66 @@ function parseJsonBody(req) {
         if (!raw) return {};
         return JSON.parse(raw);
     });
+}
+
+function redirect(res, location) {
+    res.writeHead(302, { Location: location });
+    res.end();
+}
+
+function parseCookies(req) {
+    const cookieHeader = req.headers.cookie || '';
+    const cookies = {};
+    for (const pair of cookieHeader.split(';')) {
+        const sepIndex = pair.indexOf('=');
+        if (sepIndex === -1) continue;
+        const key = pair.slice(0, sepIndex).trim();
+        const value = pair.slice(sepIndex + 1).trim();
+        cookies[key] = decodeURIComponent(value);
+    }
+    return cookies;
+}
+
+function setSessionCookie(res, token) {
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+}
+
+function clearSessionCookie(res) {
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`);
+}
+
+function createSession(username) {
+    const token = crypto.randomBytes(32).toString('hex');
+    sessions.set(token, {
+        username,
+        expiresAt: Date.now() + SESSION_TTL_MS,
+    });
+    return token;
+}
+
+function getSession(req) {
+    const token = parseCookies(req)[SESSION_COOKIE];
+    if (!token) return null;
+    const session = sessions.get(token);
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+        sessions.delete(token);
+        return null;
+    }
+    session.expiresAt = Date.now() + SESSION_TTL_MS;
+    return { token, ...session };
+}
+
+function timingSafeEquals(left, right) {
+    const leftBuffer = Buffer.from(String(left));
+    const rightBuffer = Buffer.from(String(right));
+    if (leftBuffer.length !== rightBuffer.length) return false;
+    return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function normalizeValue(value) {
+    if (value == null) return '';
+    return String(value).trim();
 }
 
 // ── Shell helper ─────────────────────────────────────────────────────────────
@@ -220,7 +286,65 @@ async function updateInstanceEnv(name, updates) {
 async function handleRequest(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // --- API routes ---
+    // --- Auth API routes (public) ---
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+        const body = await parseJsonBody(req);
+        const username = normalizeValue(body.username);
+        const password = normalizeValue(body.password);
+
+        if (!AUTH_PASSWORD) {
+            return sendJson(res, 500, { error: 'UI authentication is not configured.' });
+        }
+
+        if (!timingSafeEquals(username, AUTH_USERNAME) || !timingSafeEquals(password, AUTH_PASSWORD)) {
+            return sendJson(res, 401, { error: 'Invalid username or password.' });
+        }
+
+        const token = createSession(username);
+        setSessionCookie(res, token);
+        return sendJson(res, 200, { ok: true, username });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+        const session = getSession(req);
+        if (session) {
+            sessions.delete(session.token);
+        }
+        clearSessionCookie(res);
+        return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/auth/session') {
+        const session = getSession(req);
+        if (!session) {
+            return sendJson(res, 401, { error: 'Authentication required.' });
+        }
+        return sendJson(res, 200, { ok: true, username: session.username });
+    }
+
+    // --- Public assets ---
+    const isPublicAsset = url.pathname === '/login' || url.pathname === '/login.js' ||
+                          url.pathname === '/styles.css' || url.pathname === '/api/auth/login' ||
+                          url.pathname === '/api/instances'; // Allow ocompose to fetch instances
+
+    // --- Authentication gate ---
+    if (!isPublicAsset) {
+        const session = getSession(req);
+        if (!session) {
+            if (url.pathname.startsWith('/api/')) {
+                return sendJson(res, 401, { error: 'Authentication required.' });
+            }
+            return redirect(res, '/login');
+        }
+    }
+
+    // Redirect to home if already logged in and trying to access login page
+    if (url.pathname === '/login' && getSession(req)) {
+        return redirect(res, '/');
+    }
+
+    // --- API routes (protected) ---
 
     // List instances
     if (req.method === 'GET' && url.pathname === '/api/instances') {
@@ -310,7 +434,11 @@ async function handleRequest(req, res) {
     // --- Static files ---
 
     if (req.method === 'GET') {
-        let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
+        let filePath = url.pathname === '/'
+            ? '/index.html'
+            : url.pathname === '/login'
+                ? '/login.html'
+                : url.pathname;
         const resolved = path.resolve(PUBLIC_DIR, '.' + filePath);
         if (!resolved.startsWith(PUBLIC_DIR)) {
             return send(res, 403, 'Forbidden');
@@ -342,5 +470,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+    if (!AUTH_PASSWORD) {
+        console.warn('dbserver web UI authentication is not configured. Set DBSERVER_UI_PASSWORD before starting the server.');
+    }
     console.log(`dbserver UI running at http://localhost:${PORT}`);
 });

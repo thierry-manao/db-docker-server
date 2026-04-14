@@ -3,3 +3,4 @@ db-data/
 instances/
 seed/gtpdb*
 seed/licencesdb*
+.dbserver-ui*

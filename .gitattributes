@@ -1,0 +1,7 @@
+# Ensure shell scripts always use LF line endings
+*.sh text eol=lf
+dbserver text eol=lf
+dbserver.cmd text eol=crlf
+
+# Default behavior: let Git normalize line endings
+* text=auto
