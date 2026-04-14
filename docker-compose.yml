@@ -1,0 +1,90 @@
+services:
+  # --- MariaDB ---
+  mariadb:
+    image: mariadb:${DB_VERSION:-11}
+    profiles: [mariadb]
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-23306}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_DATABASE:-}
+      MYSQL_USER: ${DB_USER:-}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- MySQL ---
+  mysql:
+    image: mysql:${DB_VERSION:-8.0}
+    profiles: [mysql]
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-23306}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_DATABASE:-}
+      MYSQL_USER: ${DB_USER:-}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- PostgreSQL ---
+  postgres:
+    image: postgres:${DB_VERSION:-16}
+    profiles: [postgres]
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-25432}:5432"
+    environment:
+      POSTGRES_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      POSTGRES_DB: ${DB_DATABASE:-}
+      POSTGRES_USER: ${DB_USER:-postgres}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- phpMyAdmin (for MariaDB / MySQL) ---
+  phpmyadmin:
+    image: phpmyadmin:latest
+    profiles: [mariadb, mysql]
+    restart: unless-stopped
+    ports:
+      - "${DB_ADMIN_PORT:-28080}:80"
+    environment:
+      PMA_HOST: ${DB_ENGINE:-mariadb}
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: 1G
+    depends_on:
+      - ${DB_ENGINE:-mariadb}
+
+  # --- pgAdmin (for PostgreSQL) ---
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    profiles: [postgres]
+    restart: unless-stopped
+    ports:
+      - "${DB_ADMIN_PORT:-28080}:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@local.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    depends_on:
+      - postgres
+
+volumes:
+  db-data:

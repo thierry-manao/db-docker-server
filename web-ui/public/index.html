@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dbserver</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Topbar -->
+    <nav class="topbar">
+        <div class="container-fluid d-flex align-items-center justify-content-between">
+            <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-database-fill-gear fs-4"></i>
+                <span class="fw-bold">dbserver</span>
+            </div>
+            <button class="btn btn-sm btn-outline-light" id="refresh-button">
+                <i class="bi bi-arrow-clockwise"></i> Actualiser
+            </button>
+        </div>
+    </nav>
+
+    <div class="container-fluid main-container">
+        <div class="row g-4">
+            <!-- Sidebar -->
+            <div class="col-xl-3 col-lg-4">
+                <div class="card-shell sidebar-card">
+                    <div class="card-body">
+                        <h6 class="text-muted mb-3"><i class="bi bi-plus-circle"></i> Nouvelle instance</h6>
+                        <form id="create-form" class="mb-4">
+                            <div class="mb-2">
+                                <label class="form-label small text-muted mb-1">Nom de l'instance</label>
+                                <input type="text" class="form-control form-control-sm" name="name" placeholder="ex: licences" required pattern="[a-zA-Z0-9_-]+">
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-7">
+                                    <label class="form-label small text-muted mb-1">Moteur</label>
+                                    <select class="form-select form-select-sm" name="engine">
+                                        <option value="mariadb">MariaDB</option>
+                                        <option value="mysql">MySQL</option>
+                                        <option value="postgres">PostgreSQL</option>
+                                    </select>
+                                </div>
+                                <div class="col-5">
+                                    <label class="form-label small text-muted mb-1">Version</label>
+                                    <input type="text" class="form-control form-control-sm" name="version" placeholder="e.g. 11">
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small text-muted mb-1">Base par défaut</label>
+                                <input type="text" class="form-control form-control-sm" name="db" placeholder="Optionnel">
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small text-muted mb-1">Fichiers seed</label>
+                                <div id="create-seed-list" class="d-flex flex-column gap-1"></div>
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm w-100">
+                                <i class="bi bi-plus-lg"></i> Créer
+                            </button>
+                        </form>
+
+                        <h6 class="text-muted mb-2"><i class="bi bi-list-ul"></i> Instances</h6>
+                        <div id="instance-list"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Main content -->
+            <div class="col-xl-9 col-lg-8">
+                <!-- Stats bar -->
+                <div class="row g-3 mb-4" id="stats-bar">
+                    <div class="col-sm-4">
+                        <div class="card-shell stat-card">
+                            <div class="card-body text-center">
+                                <div class="stat-value" id="stat-total">0</div>
+                                <div class="stat-label">Total instances</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="card-shell stat-card">
+                            <div class="card-body text-center">
+                                <div class="stat-value text-success" id="stat-running">0</div>
+                                <div class="stat-label">En cours</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="card-shell stat-card">
+                            <div class="card-body text-center">
+                                <div class="stat-value text-secondary" id="stat-stopped">0</div>
+                                <div class="stat-label">Arrêtées</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Instance grid -->
+                <div class="row g-3" id="instance-grid"></div>
+
+                <!-- Empty state -->
+                <div class="card-shell text-center py-5 d-none" id="empty-state">
+                    <div class="card-body">
+                        <i class="bi bi-database-add display-1 text-muted"></i>
+                        <h5 class="mt-3 text-muted">Aucune instance</h5>
+                        <p class="text-muted">Créez-en une avec le formulaire à gauche.</p>
+                    </div>
+                </div>
+
+                <!-- Seed modal -->
+                <div class="modal fade" id="seed-modal" tabindex="-1">
+                    <div class="modal-dialog">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title"><i class="bi bi-file-earmark-arrow-up"></i> Importer des données</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <form id="seed-form">
+                                <div class="modal-body">
+                                    <input type="hidden" name="instance" id="seed-instance">
+                                    <div class="mb-3">
+                                        <label class="form-label">Fichiers SQL</label>
+                                        <div id="seed-file-list" class="d-flex flex-column gap-2"></div>
+                                    </div>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                                    <button type="submit" class="btn btn-primary">
+                                        <i class="bi bi-play-fill"></i> Importer la sélection
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Message toast -->
+                <div class="toast-container position-fixed bottom-0 end-0 p-3">
+                    <div class="toast align-items-center" id="message-toast" role="alert">
+                        <div class="d-flex">
+                            <div class="toast-body" id="toast-body"></div>
+                            <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

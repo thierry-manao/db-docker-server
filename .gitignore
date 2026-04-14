@@ -1,0 +1,5 @@
+.env
+db-data/
+instances/
+seed/gtpdb*
+seed/licencesdb*
