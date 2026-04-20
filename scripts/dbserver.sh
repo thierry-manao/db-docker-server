@@ -494,7 +494,7 @@ cmd_list() {
 
 cmd_ui() {
     local action="start"
-    local port="${DBSERVER_UI_PORT:-9090}"
+    local port="${DBSERVER_UI_PORT:-8888}"
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
