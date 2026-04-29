@@ -390,6 +390,41 @@ function spawnScript(args) {
     return spawn(cmd, cmdArgs, { cwd: PROJECT_DIR });
 }
 
+// ── Background task system ───────────────────────────────────────────────────
+
+const tasks = new Map();
+let taskIdCounter = 0;
+
+function createTask(label, instance) {
+    const id = String(++taskIdCounter);
+    const task = { id, label, instance, status: 'running', startedAt: Date.now(), output: '', error: null };
+    tasks.set(id, task);
+    // Keep at most 50 finished tasks
+    const finished = [...tasks.values()].filter(t => t.status !== 'running');
+    if (finished.length > 50) {
+        finished.sort((a, b) => a.startedAt - b.startedAt);
+        for (let i = 0; i < finished.length - 50; i++) tasks.delete(finished[i].id);
+    }
+    return task;
+}
+
+function runTaskScript(task, args, { timeout = 300000 } = {}) {
+    execFileAsync(
+        USE_WSL ? 'wsl' : 'bash',
+        USE_WSL ? ['bash', toWslPath(SCRIPT_PATH), ...args] : [SCRIPT_PATH, ...args],
+        { cwd: PROJECT_DIR, timeout }
+    ).then(({ stdout }) => {
+        task.status = 'done';
+        task.output = stdout.trim();
+        task.finishedAt = Date.now();
+    }).catch((err) => {
+        task.status = 'error';
+        task.error = err.stderr || err.message;
+        task.finishedAt = Date.now();
+    });
+    return task;
+}
+
 // ── Instance helpers ─────────────────────────────────────────────────────────
 
 function parseEnvFile(content) {
@@ -751,10 +786,9 @@ async function handleRequest(req, res) {
         if (db) args.push('--db', db);
         if (rootPassword) args.push('--root-password', rootPassword);
         if (seed) args.push('--seed', seed);
-        try {
-            const { stdout } = await runScript(args);
-            return sendJson(res, 201, { message: stdout.trim() });
-        } catch (err) { return sendJson(res, 500, { error: err.stderr || err.message }); }
+        const task = createTask(`Create instance ${name}${seed ? ' + seed ' + seed : ''}`, name);
+        runTaskScript(task, args);
+        return sendJson(res, 202, { message: 'Instance creation started', taskId: task.id });
     }
 
     if (req.method === 'PUT' && /^\/api\/instances\/([a-zA-Z0-9_-]+)$/.test(url.pathname)) {
@@ -765,6 +799,27 @@ async function handleRequest(req, res) {
             const instance = await getInstance(name);
             return sendJson(res, 200, instance);
         } catch { return sendJson(res, 404, { error: 'Instance not found' }); }
+    }
+
+    // ── Background tasks ────────────────────────────────────────────────────
+
+    if (url.pathname === '/api/tasks') {
+        if (req.method === 'GET') {
+            const list = [...tasks.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+            return sendJson(res, 200, { tasks: list });
+        }
+    }
+
+    const taskMatch = url.pathname.match(/^\/api\/tasks\/(\d+)$/);
+    if (taskMatch) {
+        const task = tasks.get(taskMatch[1]);
+        if (!task) return sendJson(res, 404, { error: 'Task not found' });
+        if (req.method === 'GET') return sendJson(res, 200, { task });
+        if (req.method === 'DELETE') {
+            if (task.status === 'running') return sendJson(res, 400, { error: 'Cannot delete a running task' });
+            tasks.delete(taskMatch[1]);
+            return sendJson(res, 200, { ok: true });
+        }
     }
 
     // ── Instance actions ─────────────────────────────────────────────────────
@@ -780,20 +835,18 @@ async function handleRequest(req, res) {
             if (!file) return sendJson(res, 400, { error: 'Missing seed file' });
             const args = [name, 'seed', file];
             if (db) args.push('--db', db);
-            try {
-                const { stdout } = await runScript(args);
-                return sendJson(res, 200, { message: stdout.trim() });
-            } catch (err) { return sendJson(res, 500, { error: err.stderr || err.message }); }
+            const task = createTask(`Seed ${file} → ${name}${db ? '/' + db : ''}`, name);
+            runTaskScript(task, args);
+            return sendJson(res, 202, { message: 'Seeding started', taskId: task.id });
         }
 
         if (action === 'backup') {
             const body = await parseJsonBody(req);
             const args = [name, 'backup'];
             if (body.db) args.push(body.db);
-            try {
-                const { stdout } = await runScript(args);
-                return sendJson(res, 200, { message: stdout.trim() });
-            } catch (err) { return sendJson(res, 500, { error: err.stderr || err.message }); }
+            const task = createTask(`Backup ${name}${body.db ? '/' + body.db : ''}`, name);
+            runTaskScript(task, args);
+            return sendJson(res, 202, { message: 'Backup started', taskId: task.id });
         }
 
         if (action === 'clone') {

@@ -362,12 +362,11 @@ function SeedTab({ name, inst, seedFiles, toast, refresh }) {
     for (const [file, db] of entries) {
       try {
         await api.instanceAction(name, 'seed', { file, db: db || undefined });
-        toast(`${file} importé`);
+        toast(`Import de ${file} lancé en arrière-plan`);
       } catch (err) { toast(`Erreur: ${err.message}`, 'danger'); }
     }
     setSelected({});
     setLoading(false);
-    refresh();
   };
 
   return (

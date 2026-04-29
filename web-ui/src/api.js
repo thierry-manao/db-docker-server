@@ -77,6 +77,11 @@ export const api = {
   // Setup
   completeSetup: () => request('/api/setup/complete', { method: 'POST' }),
 
+  // Tasks
+  listTasks: () => request('/api/tasks'),
+  getTask: (id) => request(`/api/tasks/${id}`),
+  deleteTask: (id) => request(`/api/tasks/${id}`, { method: 'DELETE' }),
+
   // Ports
   ports: () => request('/api/ports'),
 };

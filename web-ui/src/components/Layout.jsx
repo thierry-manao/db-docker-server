@@ -1,9 +1,10 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../App';
 import { Database, LayoutDashboard, Network, Sun, Moon, LogOut, RefreshCw, Plus, Shield, CloudCog } from 'lucide-react';
+import TaskTracker from './TaskTracker';
 
 export default function Layout() {
-  const { user, instances, refresh, theme, setTheme, handleLogout } = useApp();
+  const { user, instances, refresh, toast, theme, setTheme, handleLogout } = useApp();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -92,6 +93,7 @@ export default function Layout() {
             </h2>
           </div>
           <div className="flex items-center gap-2">
+            <TaskTracker toast={toast} />
             <button className="btn btn-outline btn-sm" onClick={refresh}>
               <RefreshCw size={14} /> Actualiser
             </button>
