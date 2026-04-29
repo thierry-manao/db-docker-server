@@ -1,9 +1,12 @@
 const http = require('http');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile, execFileSync, spawn } = require('child_process');
 const { promisify } = require('util');
+const Minio = require('minio');
+const { Pool } = require('pg');
 
 const execFileAsync = promisify(execFile);
 
@@ -13,6 +16,77 @@ const INSTANCES_DIR = path.join(PROJECT_DIR, 'instances');
 const SEED_DIR = path.join(PROJECT_DIR, 'seed');
 const BACKUPS_DIR = path.join(PROJECT_DIR, 'backups');
 const SCRIPT_PATH = path.join(PROJECT_DIR, 'scripts', 'dbserver.sh');
+const CONFIG_FILE = path.join(PROJECT_DIR, '.dbserver-config.json');
+
+// ── Global config (stored in PostgreSQL) ─────────────────────────────────────
+
+async function loadConfig() {
+    try {
+        const { rows } = await pool.query('SELECT key, value FROM config');
+        const cfg = {};
+        for (const row of rows) cfg[row.key] = row.value;
+        return cfg;
+    } catch { return {}; }
+}
+
+async function saveConfig(cfg) {
+    for (const [key, value] of Object.entries(cfg)) {
+        await pool.query(
+            `INSERT INTO config (key, value, updated_at) VALUES ($1, $2, NOW())
+             ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+            [key, JSON.stringify(value)]
+        );
+    }
+}
+
+async function deleteConfigKey(key) {
+    await pool.query('DELETE FROM config WHERE key = $1', [key]);
+}
+
+let minioClient = null;
+
+async function getMinioClient() {
+    const cfg = await loadConfig();
+    const m = cfg.minio;
+    if (!m || !m.endPoint || !m.accessKey || !m.secretKey) return null;
+    // Recreate client if config changed
+    if (!minioClient || minioClient._configHash !== JSON.stringify(m)) {
+        minioClient = new Minio.Client({
+            endPoint: m.endPoint,
+            port: m.port ? Number(m.port) : (m.useSSL ? 443 : 9000),
+            useSSL: !!m.useSSL,
+            accessKey: m.accessKey,
+            secretKey: m.secretKey,
+        });
+        minioClient._configHash = JSON.stringify(m);
+        minioClient._bucket = m.bucket || 'dbserver-seeds';
+    }
+    return minioClient;
+}
+
+async function ensureMinioBucket(client) {
+    const bucket = client._bucket;
+    const exists = await client.bucketExists(bucket);
+    if (!exists) await client.makeBucket(bucket);
+    return bucket;
+}
+
+async function listMinioFiles() {
+    const client = await getMinioClient();
+    if (!client) return [];
+    const bucket = await ensureMinioBucket(client);
+    return new Promise((resolve, reject) => {
+        const files = [];
+        const stream = client.listObjectsV2(bucket, '', true);
+        stream.on('data', (obj) => {
+            if (obj.name && /\.sql(\.gz)?$/i.test(obj.name)) {
+                files.push({ name: obj.name, size: obj.size, lastModified: obj.lastModified });
+            }
+        });
+        stream.on('error', reject);
+        stream.on('end', () => resolve(files.sort((a, b) => a.name.localeCompare(b.name))));
+    });
+}
 
 // Convert a Windows path to a WSL path: D:\foo\bar -> /mnt/d/foo/bar
 function toWslPath(winPath) {
@@ -35,10 +109,8 @@ if (process.platform === 'win32') {
 console.log(`[dbserver-ui] Docker mode: ${USE_WSL ? 'WSL' : 'native'}`);
 
 const PORT = Number(process.argv[2]) || Number(process.env.DBSERVER_UI_PORT) || 9090;
-const ADMIN_CREDS_FILE = path.join(PROJECT_DIR, '.admin-credentials.json');
-let authUsername = String(process.env.DBSERVER_UI_USERNAME || 'admin').trim();
-let authPassword = String(process.env.DBSERVER_UI_PASSWORD || '').trim();
-let authPasswordHashed = false;
+
+// ── Password hashing ─────────────────────────────────────────────────────────
 
 function hashPassword(plain) {
     const salt = crypto.randomBytes(16).toString('hex');
@@ -48,7 +120,6 @@ function hashPassword(plain) {
 
 function verifyPassword(plain, stored) {
     if (!stored.includes(':')) {
-        // Plain-text comparison (env var fallback)
         return timingSafeEquals(plain, stored);
     }
     const [salt, key] = stored.split(':');
@@ -56,22 +127,113 @@ function verifyPassword(plain, stored) {
     return timingSafeEquals(derived, key);
 }
 
-function loadAdminCreds() {
-    try {
-        const data = JSON.parse(require('fs').readFileSync(ADMIN_CREDS_FILE, 'utf8'));
-        if (data.username) authUsername = data.username;
-        if (data.password) { authPassword = data.password; authPasswordHashed = true; }
-        console.log('[dbserver-ui] Admin credentials loaded from file');
-    } catch {
-        // No file yet — use env vars
+// ── PostgreSQL database ──────────────────────────────────────────────────────
+
+const PG_HOST = process.env.DBSERVER_PG_HOST || 'localhost';
+const PG_PORT = Number(process.env.DBSERVER_PG_PORT || 5480);
+const PG_DB = process.env.DBSERVER_PG_DB || 'dbserver';
+const PG_USER = process.env.DBSERVER_PG_USER || 'dbserver';
+const PG_PASSWORD = process.env.DBSERVER_PG_PASSWORD || 'dbserver';
+
+const pool = new Pool({
+    host: PG_HOST, port: PG_PORT, database: PG_DB,
+    user: PG_USER, password: PG_PASSWORD,
+    max: 5, idleTimeoutMillis: 30000,
+});
+
+// Prevent unhandled pool errors from crashing the process
+pool.on('error', (err) => {
+    console.error('[dbserver-ui] PostgreSQL pool error (will reconnect):', err.message);
+});
+
+async function initDatabase() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS admins (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role VARCHAR(20) DEFAULT 'admin',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS config (
+            key VARCHAR(100) PRIMARY KEY,
+            value JSONB NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    `);
+    // Migrate file-based config to DB if exists and DB is empty
+    const { rows: cfgRows } = await pool.query("SELECT COUNT(*) as count FROM config");
+    if (Number(cfgRows[0].count) === 0) {
+        try {
+            const fileConfig = JSON.parse(fsSync.readFileSync(CONFIG_FILE, 'utf8'));
+            for (const [key, value] of Object.entries(fileConfig)) {
+                await pool.query('INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT DO NOTHING', [key, JSON.stringify(value)]);
+            }
+            console.log('[dbserver-ui] Migrated file config to database');
+        } catch {}
+    }
+    // Seed default admin from env vars if table is empty
+    const { rows } = await pool.query('SELECT COUNT(*) as count FROM admins');
+    if (Number(rows[0].count) === 0) {
+        const defaultUser = String(process.env.DBSERVER_UI_USERNAME || 'admin').trim();
+        const defaultPass = String(process.env.DBSERVER_UI_PASSWORD || 'admin').trim();
+        await pool.query(
+            'INSERT INTO admins (username, password, role) VALUES ($1, $2, $3)',
+            [defaultUser, hashPassword(defaultPass), 'superadmin']
+        );
+        console.log(`[dbserver-ui] Default admin '${defaultUser}' created in database`);
     }
 }
 
-function saveAdminCreds() {
-    require('fs').writeFileSync(ADMIN_CREDS_FILE, JSON.stringify({ username: authUsername, password: authPassword }, null, 2), 'utf8');
+async function findUserByUsername(username) {
+    const { rows } = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
+    return rows[0] || null;
 }
 
-loadAdminCreds();
+async function listAdmins() {
+    const { rows } = await pool.query('SELECT id, username, role, created_at, updated_at FROM admins ORDER BY id');
+    return rows;
+}
+
+async function createAdmin(username, password, role = 'admin') {
+    const hashed = hashPassword(password);
+    const { rows } = await pool.query(
+        'INSERT INTO admins (username, password, role) VALUES ($1, $2, $3) RETURNING id, username, role, created_at',
+        [username, hashed, role]
+    );
+    return rows[0];
+}
+
+async function updateAdminPassword(id, newPassword) {
+    const hashed = hashPassword(newPassword);
+    await pool.query('UPDATE admins SET password = $1, updated_at = NOW() WHERE id = $2', [hashed, id]);
+}
+
+async function updateAdminUsername(id, newUsername) {
+    await pool.query('UPDATE admins SET username = $1, updated_at = NOW() WHERE id = $2', [newUsername, id]);
+}
+
+async function updateAdminRole(id, role) {
+    await pool.query('UPDATE admins SET role = $1, updated_at = NOW() WHERE id = $2', [role, id]);
+}
+
+async function deleteAdmin(id) {
+    await pool.query('DELETE FROM admins WHERE id = $1', [id]);
+}
+
+async function isSetupRequired() {
+    try {
+        const { rows } = await pool.query("SELECT value FROM config WHERE key = 'setup_required'");
+        return rows.length > 0 && rows[0].value === true;
+    } catch { return false; }
+}
+
+async function completeSetup() {
+    await pool.query("DELETE FROM config WHERE key = 'setup_required'");
+}
 
 const SESSION_COOKIE = 'dbserver_ui_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
@@ -109,6 +271,41 @@ function readBody(req) {
     });
 }
 
+function readBodyRaw(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+    });
+}
+
+function parseMultipart(raw, boundary) {
+    const sep = Buffer.from('--' + boundary);
+    const parts = [];
+    let start = 0;
+    while (true) {
+        const idx = raw.indexOf(sep, start);
+        if (idx === -1) break;
+        if (start > 0) parts.push(raw.slice(start, idx));
+        start = idx + sep.length;
+        // skip \r\n after boundary
+        if (raw[start] === 0x0d && raw[start + 1] === 0x0a) start += 2;
+    }
+    for (const part of parts) {
+        const headerEnd = part.indexOf('\r\n\r\n');
+        if (headerEnd === -1) continue;
+        const headers = part.slice(0, headerEnd).toString();
+        const filenameMatch = headers.match(/filename="([^"]+)"/);
+        if (!filenameMatch) continue;
+        let data = part.slice(headerEnd + 4);
+        // trim trailing \r\n
+        if (data[data.length - 2] === 0x0d && data[data.length - 1] === 0x0a) data = data.slice(0, -2);
+        return { fileName: filenameMatch[1], fileData: data };
+    }
+    return { fileName: null, fileData: null };
+}
+
 function parseJsonBody(req) {
     return readBody(req).then((raw) => {
         if (!raw) return {};
@@ -142,9 +339,9 @@ function clearSessionCookie(res) {
     res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`);
 }
 
-function createSession(username) {
+function createSession(username, role = 'admin') {
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { username, expiresAt: Date.now() + SESSION_TTL_MS });
+    sessions.set(token, { username, role, expiresAt: Date.now() + SESSION_TTL_MS });
     return token;
 }
 
@@ -361,13 +558,17 @@ async function handleRequest(req, res) {
         const body = await parseJsonBody(req);
         const username = normalizeValue(body.username);
         const password = normalizeValue(body.password);
-        if (!authPassword) return sendJson(res, 500, { error: 'UI authentication is not configured.' });
-        if (!timingSafeEquals(username, authUsername) || !verifyPassword(password, authPassword)) {
-            return sendJson(res, 401, { error: 'Invalid username or password.' });
-        }
-        const token = createSession(username);
-        setSessionCookie(res, token);
-        return sendJson(res, 200, { ok: true, username });
+        if (!username || !password) return sendJson(res, 400, { error: 'Username and password required.' });
+        try {
+            const user = await findUserByUsername(username);
+            if (!user || !verifyPassword(password, user.password)) {
+                return sendJson(res, 401, { error: 'Invalid username or password.' });
+            }
+            const token = createSession(username, user.role);
+            setSessionCookie(res, token);
+            const setupRequired = await isSetupRequired();
+            return sendJson(res, 200, { ok: true, username, role: user.role, setupRequired });
+        } catch (err) { return sendJson(res, 500, { error: 'Database error: ' + err.message }); }
     }
 
     if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
@@ -380,7 +581,8 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && url.pathname === '/api/auth/session') {
         const session = getSession(req);
         if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
-        return sendJson(res, 200, { ok: true, username: session.username });
+        const setupRequired = await isSetupRequired();
+        return sendJson(res, 200, { ok: true, username: session.username, role: session.role, setupRequired });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/auth/change-password') {
@@ -392,17 +594,125 @@ async function handleRequest(req, res) {
         const newUsername = normalizeValue(body.username);
         if (!currentPw || !newPw) return sendJson(res, 400, { error: 'Current and new passwords are required.' });
         if (newPw.length < 4) return sendJson(res, 400, { error: 'New password must be at least 4 characters.' });
-        if (!verifyPassword(currentPw, authPassword)) {
-            return sendJson(res, 403, { error: 'Current password is incorrect.' });
+        try {
+            const user = await findUserByUsername(session.username);
+            if (!user || !verifyPassword(currentPw, user.password)) {
+                return sendJson(res, 403, { error: 'Current password is incorrect.' });
+            }
+            await updateAdminPassword(user.id, newPw);
+            if (newUsername && newUsername !== user.username) {
+                await updateAdminUsername(user.id, newUsername);
+            }
+            // Invalidate all sessions for this user
+            for (const [tok, sess] of sessions) {
+                if (sess.username === session.username) sessions.delete(tok);
+            }
+            clearSessionCookie(res);
+            return sendJson(res, 200, { ok: true, message: 'Credentials updated. Please log in again.' });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/setup/complete') {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        if (session.role !== 'superadmin') return sendJson(res, 403, { error: 'Superadmin access required.' });
+        try {
+            await completeSetup();
+            return sendJson(res, 200, { ok: true, message: 'Setup completed.' });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // ── Admin user management (superadmin only) ──────────────────────────────
+
+    if (url.pathname === '/api/admins') {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+
+        // Check superadmin role for write operations
+        const requireSuperadmin = () => {
+            if (session.role !== 'superadmin') {
+                sendJson(res, 403, { error: 'Superadmin access required.' });
+                return false;
+            }
+            return true;
+        };
+
+        if (req.method === 'GET') {
+            try {
+                const admins = await listAdmins();
+                return sendJson(res, 200, { admins });
+            } catch (err) { return sendJson(res, 500, { error: err.message }); }
         }
-        if (newUsername && newUsername !== authUsername) authUsername = newUsername;
-        authPassword = hashPassword(newPw);
-        authPasswordHashed = true;
-        saveAdminCreds();
-        // Invalidate all sessions so user must re-login with new creds
-        sessions.clear();
-        clearSessionCookie(res);
-        return sendJson(res, 200, { ok: true, message: 'Credentials updated. Please log in again.' });
+
+        if (req.method === 'POST') {
+            if (!requireSuperadmin()) return;
+            const body = await parseJsonBody(req);
+            const username = normalizeValue(body.username);
+            const password = normalizeValue(body.password);
+            const role = body.role === 'superadmin' ? 'superadmin' : 'admin';
+            if (!username || !password) return sendJson(res, 400, { error: 'Username and password required.' });
+            if (password.length < 4) return sendJson(res, 400, { error: 'Password must be at least 4 characters.' });
+            try {
+                const existing = await findUserByUsername(username);
+                if (existing) return sendJson(res, 409, { error: `User '${username}' already exists.` });
+                const admin = await createAdmin(username, password, role);
+                return sendJson(res, 201, { ok: true, admin });
+            } catch (err) { return sendJson(res, 500, { error: err.message }); }
+        }
+
+        if (req.method === 'DELETE') {
+            if (!requireSuperadmin()) return;
+            const body = await parseJsonBody(req);
+            const id = Number(body.id);
+            if (!id) return sendJson(res, 400, { error: 'Missing user id.' });
+            try {
+                // Prevent deleting yourself
+                const user = await findUserByUsername(session.username);
+                if (user && user.id === id) return sendJson(res, 400, { error: 'Cannot delete your own account.' });
+                // Prevent deleting last superadmin
+                const { rows } = await pool.query("SELECT COUNT(*) as count FROM admins WHERE role = 'superadmin'");
+                const target = (await pool.query('SELECT role FROM admins WHERE id = $1', [id])).rows[0];
+                if (target?.role === 'superadmin' && Number(rows[0].count) <= 1) {
+                    return sendJson(res, 400, { error: 'Cannot delete the last superadmin.' });
+                }
+                await deleteAdmin(id);
+                // Invalidate sessions for deleted user
+                for (const [tok, sess] of sessions) {
+                    const u = await findUserByUsername(sess.username);
+                    if (!u) sessions.delete(tok);
+                }
+                return sendJson(res, 200, { ok: true });
+            } catch (err) { return sendJson(res, 500, { error: err.message }); }
+        }
+    }
+
+    const adminRoleMatch = url.pathname.match(/^\/api\/admins\/(\d+)\/role$/);
+    if (req.method === 'PUT' && adminRoleMatch) {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        if (session.role !== 'superadmin') return sendJson(res, 403, { error: 'Superadmin access required.' });
+        const id = Number(adminRoleMatch[1]);
+        const body = await parseJsonBody(req);
+        const role = body.role === 'superadmin' ? 'superadmin' : 'admin';
+        try {
+            await updateAdminRole(id, role);
+            return sendJson(res, 200, { ok: true });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    const adminPasswdMatch = url.pathname.match(/^\/api\/admins\/(\d+)\/password$/);
+    if (req.method === 'POST' && adminPasswdMatch) {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        if (session.role !== 'superadmin') return sendJson(res, 403, { error: 'Superadmin access required.' });
+        const id = Number(adminPasswdMatch[1]);
+        const body = await parseJsonBody(req);
+        const newPassword = normalizeValue(body.password);
+        if (!newPassword || newPassword.length < 4) return sendJson(res, 400, { error: 'Password must be at least 4 characters.' });
+        try {
+            await updateAdminPassword(id, newPassword);
+            return sendJson(res, 200, { ok: true, message: 'Password updated.' });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
     }
 
     // --- Public API (allow ocompose to fetch instances) ---
@@ -621,6 +931,234 @@ async function handleRequest(req, res) {
         return sendJson(res, 200, { backups });
     }
 
+    // ── MinIO / Seed Store ───────────────────────────────────────────────────
+
+    if (url.pathname === '/api/config/minio') {
+        if (req.method === 'GET') {
+            const cfg = await loadConfig();
+            const m = cfg.minio || {};
+            // Don't expose secretKey in full
+            return sendJson(res, 200, {
+                configured: !!(m.endPoint && m.accessKey && m.secretKey),
+                endPoint: m.endPoint || '',
+                port: m.port || '',
+                useSSL: !!m.useSSL,
+                accessKey: m.accessKey || '',
+                bucket: m.bucket || 'dbserver-seeds',
+            });
+        }
+        if (req.method === 'POST') {
+            const body = await parseJsonBody(req);
+            const cfg = await loadConfig();
+            const existingSecret = cfg.minio?.secretKey || '';
+            cfg.minio = {
+                endPoint: String(body.endPoint || '').trim().replace(/^https?:\/\//, ''),
+                port: body.port ? Number(body.port) : undefined,
+                useSSL: !!body.useSSL,
+                accessKey: String(body.accessKey || '').trim(),
+                secretKey: String(body.secretKey || '').trim() || existingSecret,
+                bucket: String(body.bucket || 'dbserver-seeds').trim(),
+            };
+            await saveConfig(cfg);
+            minioClient = null; // force reconnect
+            return sendJson(res, 200, { ok: true, message: 'MinIO configuration saved.' });
+        }
+        if (req.method === 'DELETE') {
+            await deleteConfigKey('minio');
+            minioClient = null;
+            return sendJson(res, 200, { ok: true, message: 'MinIO configuration removed.' });
+        }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/config/minio/test') {
+        try {
+            const client = await getMinioClient();
+            if (!client) return sendJson(res, 400, { error: 'MinIO is not configured.' });
+            await ensureMinioBucket(client);
+            return sendJson(res, 200, { ok: true, message: 'Connection successful.' });
+        } catch (err) { return sendJson(res, 500, { error: 'Connection failed: ' + err.message }); }
+    }
+
+    // Get MinIO service status + credentials
+    if (req.method === 'GET' && url.pathname === '/api/config/minio/service') {
+        const composeFile = path.join(PROJECT_DIR, 'docker-compose.minio.yml');
+        try {
+            await fs.access(composeFile);
+        } catch { return sendJson(res, 200, { available: false }); }
+        // Read env file if exists
+        const envFile = path.join(PROJECT_DIR, '.env.minio');
+        let env = {};
+        try {
+            env = parseEnvFile(await fs.readFile(envFile, 'utf8'));
+        } catch {}
+        // Check container status
+        let running = false;
+        try {
+            const composePath = USE_WSL ? toWslPath(composeFile) : composeFile;
+            const cmd = USE_WSL ? 'wsl' : 'bash';
+            const args = USE_WSL
+                ? ['bash', '-c', `docker compose -f "${composePath}" -p dbserver-minio ps --format json 2>/dev/null`]
+                : ['-c', `docker compose -f "${composePath}" -p dbserver-minio ps --format json 2>/dev/null`];
+            const { stdout } = await execFileAsync(cmd, args, { cwd: PROJECT_DIR, timeout: 10000 });
+            running = stdout.includes('"running"') || stdout.includes('"Up"');
+        } catch {}
+        return sendJson(res, 200, {
+            available: true,
+            running,
+            rootUser: env.MINIO_ROOT_USER || 'minioadmin',
+            rootPassword: env.MINIO_ROOT_PASSWORD || 'minioadmin',
+            apiPort: env.MINIO_API_PORT || '9002',
+            consolePort: env.MINIO_CONSOLE_PORT || '9003',
+        });
+    }
+
+    // Update MinIO service credentials and restart
+    if (req.method === 'POST' && url.pathname === '/api/config/minio/service') {
+        const body = await parseJsonBody(req);
+        const rootUser = String(body.rootUser || '').trim();
+        const rootPassword = String(body.rootPassword || '').trim();
+        const apiPort = String(body.apiPort || '9002').trim();
+        const consolePort = String(body.consolePort || '9003').trim();
+        if (!rootUser || !rootPassword) return sendJson(res, 400, { error: 'Root user and password are required.' });
+        if (rootUser.length < 3) return sendJson(res, 400, { error: 'Root user must be at least 3 characters.' });
+        if (rootPassword.length < 8) return sendJson(res, 400, { error: 'Root password must be at least 8 characters (MinIO requirement).' });
+
+        // Write .env.minio
+        const envFile = path.join(PROJECT_DIR, '.env.minio');
+        const envContent = `MINIO_ROOT_USER=${rootUser}\nMINIO_ROOT_PASSWORD=${rootPassword}\nMINIO_API_PORT=${apiPort}\nMINIO_CONSOLE_PORT=${consolePort}\n`;
+        await fs.writeFile(envFile, envContent, 'utf8');
+
+        // Recreate MinIO container with new creds
+        const composeFile = path.join(PROJECT_DIR, 'docker-compose.minio.yml');
+        const composePath = USE_WSL ? toWslPath(composeFile) : composeFile;
+        const envPath = USE_WSL ? toWslPath(envFile) : envFile;
+        try {
+            const cmd = USE_WSL ? 'wsl' : 'bash';
+            const args = USE_WSL
+                ? ['bash', '-c', `docker compose -f "${composePath}" --env-file "${envPath}" -p dbserver-minio up -d --force-recreate 2>&1`]
+                : ['-c', `docker compose -f "${composePath}" --env-file "${envPath}" -p dbserver-minio up -d --force-recreate 2>&1`];
+            await execFileAsync(cmd, args, { cwd: PROJECT_DIR, timeout: 60000 });
+        } catch (err) {
+            return sendJson(res, 500, { error: 'Failed to restart MinIO: ' + (err.stderr || err.message) });
+        }
+
+        // Auto-update connection config to match new creds
+        const cfg = await loadConfig();
+        const existing = cfg.minio || {};
+        cfg.minio = {
+            endPoint: existing.endPoint || PG_HOST,
+            port: Number(apiPort),
+            useSSL: existing.useSSL || false,
+            accessKey: rootUser,
+            secretKey: rootPassword,
+            bucket: existing.bucket || 'dbserver-seeds',
+        };
+        await saveConfig(cfg);
+        minioClient = null;
+
+        return sendJson(res, 200, { ok: true, message: 'MinIO credentials updated and service restarted.' });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/minio/files') {
+        try {
+            const files = await listMinioFiles();
+            return sendJson(res, 200, { files });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // Upload local seed file → MinIO
+    if (req.method === 'POST' && url.pathname === '/api/minio/upload') {
+        const body = await parseJsonBody(req);
+        const fileName = body.file;
+        if (!fileName) return sendJson(res, 400, { error: 'Missing file name.' });
+        const localPath = path.join(SEED_DIR, fileName);
+        const resolved = path.resolve(localPath);
+        if (!resolved.startsWith(path.resolve(SEED_DIR))) return sendJson(res, 403, { error: 'Forbidden' });
+        try {
+            const client = await getMinioClient();
+            if (!client) return sendJson(res, 400, { error: 'MinIO is not configured.' });
+            const bucket = await ensureMinioBucket(client);
+            const stat = await fs.stat(resolved);
+            await client.fPutObject(bucket, fileName, resolved, { 'Content-Type': 'application/sql' });
+            return sendJson(res, 200, { ok: true, message: `${fileName} uploaded to MinIO (${(stat.size / 1048576).toFixed(1)} MB).` });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // Download MinIO file → local seed/
+    if (req.method === 'POST' && url.pathname === '/api/minio/download') {
+        const body = await parseJsonBody(req);
+        const fileName = body.file;
+        if (!fileName) return sendJson(res, 400, { error: 'Missing file name.' });
+        const baseName = path.basename(fileName); // prevent path traversal
+        const localPath = path.join(SEED_DIR, baseName);
+        try {
+            const client = await getMinioClient();
+            if (!client) return sendJson(res, 400, { error: 'MinIO is not configured.' });
+            const bucket = await ensureMinioBucket(client);
+            await client.fGetObject(bucket, fileName, localPath);
+            return sendJson(res, 200, { ok: true, message: `${baseName} downloaded to seed/.` });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // Delete file from MinIO
+    if (req.method === 'DELETE' && url.pathname === '/api/minio/files') {
+        const body = await parseJsonBody(req);
+        const fileName = body.file;
+        if (!fileName) return sendJson(res, 400, { error: 'Missing file name.' });
+        try {
+            const client = await getMinioClient();
+            if (!client) return sendJson(res, 400, { error: 'MinIO is not configured.' });
+            const bucket = await ensureMinioBucket(client);
+            await client.removeObject(bucket, fileName);
+            return sendJson(res, 200, { ok: true, message: `${fileName} deleted from MinIO.` });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // Upload file from browser → MinIO (multipart)
+    if (req.method === 'POST' && url.pathname === '/api/minio/upload-file') {
+        try {
+            const client = await getMinioClient();
+            if (!client) return sendJson(res, 400, { error: 'MinIO is not configured.' });
+            const bucket = await ensureMinioBucket(client);
+            const contentType = req.headers['content-type'] || '';
+            if (!contentType.startsWith('multipart/form-data')) {
+                return sendJson(res, 400, { error: 'Expected multipart/form-data' });
+            }
+            const boundary = contentType.split('boundary=')[1];
+            if (!boundary) return sendJson(res, 400, { error: 'Missing boundary' });
+
+            const raw = await readBodyRaw(req);
+            const { fileName, fileData } = parseMultipart(raw, boundary);
+            if (!fileName || !fileData) return sendJson(res, 400, { error: 'No file found in upload.' });
+            if (!/\.sql(\.gz)?$/i.test(fileName)) return sendJson(res, 400, { error: 'Only .sql and .sql.gz files are allowed.' });
+
+            await client.putObject(bucket, fileName, fileData, fileData.length);
+            return sendJson(res, 200, { ok: true, message: `${fileName} uploaded to MinIO (${(fileData.length / 1048576).toFixed(1)} MB).` });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // Upload file from browser → local seed/ (multipart)
+    if (req.method === 'POST' && url.pathname === '/api/seed-files/upload') {
+        try {
+            const contentType = req.headers['content-type'] || '';
+            if (!contentType.startsWith('multipart/form-data')) {
+                return sendJson(res, 400, { error: 'Expected multipart/form-data' });
+            }
+            const boundary = contentType.split('boundary=')[1];
+            if (!boundary) return sendJson(res, 400, { error: 'Missing boundary' });
+
+            const raw = await readBodyRaw(req);
+            const { fileName, fileData } = parseMultipart(raw, boundary);
+            if (!fileName || !fileData) return sendJson(res, 400, { error: 'No file found in upload.' });
+            if (!/\.sql(\.gz)?$/i.test(fileName)) return sendJson(res, 400, { error: 'Only .sql and .sql.gz files are allowed.' });
+
+            const destPath = path.join(SEED_DIR, path.basename(fileName));
+            await fs.mkdir(SEED_DIR, { recursive: true });
+            await fs.writeFile(destPath, fileData);
+            return sendJson(res, 200, { ok: true, message: `${fileName} saved to seed/ (${(fileData.length / 1048576).toFixed(1)} MB).` });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
     // ── Port map ─────────────────────────────────────────────────────────────
 
     if (req.method === 'GET' && url.pathname === '/api/ports') {
@@ -639,16 +1177,25 @@ async function handleRequest(req, res) {
         let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
         const resolved = path.resolve(DIST_DIR, '.' + filePath);
         if (!resolved.startsWith(DIST_DIR)) return send(res, 403, 'Forbidden');
+
+        const serveFile = (res, content, ext) => {
+            const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+            if (ext === '.html') {
+                res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            } else if (ext === '.js' || ext === '.css') {
+                res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+            }
+            return send(res, 200, content, contentType);
+        };
+
         try {
             const content = await fs.readFile(resolved);
-            const ext = path.extname(resolved);
-            const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-            return send(res, 200, content, contentType);
+            return serveFile(res, content, path.extname(resolved));
         } catch {
             // SPA fallback: serve index.html for client-side routing
             try {
                 const indexContent = await fs.readFile(path.join(DIST_DIR, 'index.html'));
-                return send(res, 200, indexContent, MIME_TYPES['.html']);
+                return serveFile(res, indexContent, '.html');
             } catch {
                 return send(res, 404, 'Not found');
             }
@@ -669,9 +1216,13 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
-server.listen(PORT, () => {
-    if (!authPassword) {
-        console.warn('dbserver web UI authentication is not configured. Set DBSERVER_UI_PASSWORD before starting the server.');
+server.listen(PORT, async () => {
+    try {
+        await initDatabase();
+        console.log('[dbserver-ui] PostgreSQL connected, admins table ready');
+    } catch (err) {
+        console.error('[dbserver-ui] WARN: PostgreSQL init failed:', err.message);
+        console.error('[dbserver-ui] Auth will not work until database is available.');
     }
     console.log(`dbserver UI running at http://localhost:${PORT}`);
 });

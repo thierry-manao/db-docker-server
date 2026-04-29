@@ -1,6 +1,6 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../App';
-import { Database, LayoutDashboard, Network, Sun, Moon, LogOut, RefreshCw, Plus, Shield } from 'lucide-react';
+import { Database, LayoutDashboard, Network, Sun, Moon, LogOut, RefreshCw, Plus, Shield, CloudCog } from 'lucide-react';
 
 export default function Layout() {
   const { user, instances, refresh, theme, setTheme, handleLogout } = useApp();
@@ -38,6 +38,13 @@ export default function Layout() {
             <Network size={16} />
             <span>Ports</span>
           </div>
+          <div
+            className={`sidebar-item ${location.pathname === '/seeds' ? 'active' : ''}`}
+            onClick={() => navigate('/seeds')}
+          >
+            <CloudCog size={16} />
+            <span>Seed Store</span>
+          </div>
 
           <div style={{ padding: '0.75rem 1rem 0.35rem', fontSize: '0.65rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-secondary)' }}>
             Instances
@@ -58,7 +65,7 @@ export default function Layout() {
         <div style={{ padding: '0.75rem 1rem', borderTop: '1px solid var(--panel-border)' }}>
           <div className="flex items-center justify-between">
             <span className="text-xs text-muted" style={{ cursor: 'pointer' }} onClick={() => navigate('/profile')} title="Profil">
-              <Shield size={12} style={{ display: 'inline', verticalAlign: -2, marginRight: 4 }} />{user}
+              <Shield size={12} style={{ display: 'inline', verticalAlign: -2, marginRight: 4 }} />{user?.username}
             </span>
             <div className="flex gap-1">
               <button className="btn btn-ghost btn-icon" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} title="Thème">
@@ -79,6 +86,7 @@ export default function Layout() {
             <h2 style={{ fontSize: '0.9rem', fontWeight: 600 }}>
               {location.pathname === '/' && 'Tableau de bord'}
               {location.pathname === '/ports' && 'Allocation des ports'}
+              {location.pathname === '/seeds' && 'Seed Store'}
               {location.pathname === '/profile' && 'Profil'}
               {location.pathname.startsWith('/instance/') && location.pathname.split('/')[2]}
             </h2>

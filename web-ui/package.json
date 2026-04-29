@@ -9,10 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "lucide-react": "^0.500.0",
+    "minio": "^8.0.7",
+    "pg": "^8.20.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^7.5.0",
-    "lucide-react": "^0.500.0"
+    "react-router-dom": "^7.5.0"
   },
   "devDependencies": {
     "@types/react": "^19.1.0",

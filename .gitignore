@@ -5,5 +5,8 @@ seed/*.sql
 seed/*.gz
 backups/
 .dbserver-ui*
+.dbserver-config.json
+.admin-credentials.json
+.env.minio
 web-ui/node_modules/
 web-ui/dist/

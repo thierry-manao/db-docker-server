@@ -6,6 +6,8 @@ import Dashboard from './pages/Dashboard';
 import InstanceDetail from './pages/InstanceDetail';
 import Ports from './pages/Ports';
 import Profile from './pages/Profile';
+import SeedStore from './pages/SeedStore';
+import Setup from './pages/Setup';
 import Layout from './components/Layout';
 
 export const AppContext = createContext(null);
@@ -16,6 +18,7 @@ export function useApp() {
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const [setupRequired, setSetupRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [instances, setInstances] = useState([]);
   const [seedFiles, setSeedFiles] = useState([]);
@@ -45,7 +48,8 @@ export default function App() {
 
   useEffect(() => {
     api.session().then((data) => {
-      setUser(data.username);
+      setUser({ username: data.username, role: data.role });
+      setSetupRequired(!!data.setupRequired);
       refresh();
     }).catch(() => {}).finally(() => setLoading(false));
   }, [refresh]);
@@ -57,8 +61,9 @@ export default function App() {
   }, [user, refresh]);
 
   const handleLogin = async (username, password) => {
-    await api.login(username, password);
-    setUser(username);
+    const data = await api.login(username, password);
+    setUser({ username: data.username, role: data.role });
+    setSetupRequired(!!data.setupRequired);
     await refresh();
   };
 
@@ -69,6 +74,19 @@ export default function App() {
   };
 
   if (loading) return <div className="login-page"><div className="spinner" /></div>;
+
+  if (user && setupRequired) {
+    return (
+      <AppContext.Provider value={{ user, instances, seedFiles, refresh, toast, theme, setTheme, handleLogout }}>
+        <div className="toast-container">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast toast-${t.type}`}>{t.message}</div>
+          ))}
+        </div>
+        <Setup onComplete={() => setSetupRequired(false)} />
+      </AppContext.Provider>
+    );
+  }
 
   const ctx = { user, instances, seedFiles, refresh, toast, theme, setTheme, handleLogout };
 
@@ -86,6 +104,7 @@ export default function App() {
           <Route path="/instance/:name" element={<InstanceDetail />} />
           <Route path="/instance/:name/:tab" element={<InstanceDetail />} />
           <Route path="/ports" element={<Ports />} />
+          <Route path="/seeds" element={<SeedStore />} />
           <Route path="/profile" element={<Profile />} />
         </Route>
       </Routes>

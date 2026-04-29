@@ -42,6 +42,40 @@ export const api = {
   // Seed & Backups
   seedFiles: () => request('/api/seed-files'),
   backups: () => request('/api/backups'),
+  uploadSeedFile: (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return fetch('/api/seed-files/upload', { method: 'POST', body: form, credentials: 'same-origin' })
+      .then(r => r.json().then(d => r.ok ? d : Promise.reject(new Error(d.error || `HTTP ${r.status}`))));
+  },
+
+  // MinIO
+  getMinioConfig: () => request('/api/config/minio'),
+  saveMinioConfig: (cfg) => request('/api/config/minio', { method: 'POST', body: JSON.stringify(cfg) }),
+  removeMinioConfig: () => request('/api/config/minio', { method: 'DELETE' }),
+  testMinioConnection: () => request('/api/config/minio/test', { method: 'POST' }),
+  getMinioService: () => request('/api/config/minio/service'),
+  updateMinioService: (data) => request('/api/config/minio/service', { method: 'POST', body: JSON.stringify(data) }),
+  listMinioFiles: () => request('/api/minio/files'),
+  uploadToMinio: (file) => request('/api/minio/upload', { method: 'POST', body: JSON.stringify({ file }) }),
+  downloadFromMinio: (file) => request('/api/minio/download', { method: 'POST', body: JSON.stringify({ file }) }),
+  deleteFromMinio: (file) => request('/api/minio/files', { method: 'DELETE', body: JSON.stringify({ file }) }),
+  uploadFileToMinio: (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return fetch('/api/minio/upload-file', { method: 'POST', body: form, credentials: 'same-origin' })
+      .then(r => r.json().then(d => r.ok ? d : Promise.reject(new Error(d.error || `HTTP ${r.status}`))));
+  },
+
+  // Admin user management
+  listAdmins: () => request('/api/admins'),
+  createAdminUser: (username, password, role) => request('/api/admins', { method: 'POST', body: JSON.stringify({ username, password, role }) }),
+  deleteAdminUser: (id) => request('/api/admins', { method: 'DELETE', body: JSON.stringify({ id }) }),
+  resetAdminPassword: (id, password) => request(`/api/admins/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) }),
+  updateAdminRole: (id, role) => request(`/api/admins/${id}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
+
+  // Setup
+  completeSetup: () => request('/api/setup/complete', { method: 'POST' }),
 
   // Ports
   ports: () => request('/api/ports'),
