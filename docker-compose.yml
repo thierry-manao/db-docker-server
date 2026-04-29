@@ -18,6 +18,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - dbserver
 
   # --- MySQL ---
   mysql:
@@ -38,6 +40,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - dbserver
 
   # --- PostgreSQL ---
   postgres:
@@ -57,6 +61,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - dbserver
 
   # --- phpMyAdmin (for MariaDB / MySQL) ---
   phpmyadmin:
@@ -71,6 +77,8 @@ services:
       UPLOAD_LIMIT: 1G
     depends_on:
       - ${DB_ENGINE:-mariadb}
+    networks:
+      - dbserver
 
   # --- pgAdmin (for PostgreSQL) ---
   pgadmin:
@@ -85,6 +93,13 @@ services:
       PGADMIN_CONFIG_SERVER_MODE: "False"
     depends_on:
       - postgres
+    networks:
+      - dbserver
 
 volumes:
   db-data:
+
+networks:
+  dbserver:
+    name: dbserver_${PROJECT_NAME:-default}
+    driver: bridge

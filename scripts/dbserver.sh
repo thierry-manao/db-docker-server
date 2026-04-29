@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTANCES_DIR="$PROJECT_DIR/instances"
 SEED_DIR="$PROJECT_DIR/seed"
+BACKUPS_DIR="$PROJECT_DIR/backups"
 TEMPLATE_PATH="$PROJECT_DIR/.env.example"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 UI_PID_FILE="$PROJECT_DIR/.dbserver-ui.pid"
@@ -24,6 +25,7 @@ usage() {
     cat <<'EOF'
 Usage: dbserver <instance> <command> [options]
        dbserver list
+       dbserver ports
        dbserver ui <action> [options]
 
 Commands:
@@ -33,9 +35,14 @@ Commands:
   destroy       Remove instance and its volumes
   status        Show instance status
   seed          Import a SQL file into the running DB
+  backup        Dump the database to a timestamped SQL file
+  clone         Clone an instance (config + data)
+  exec          Run arbitrary SQL on the instance
+  creds         Manage DB users (list|create|drop|passwd)
   logs          Tail container logs
   shell         Open a shell in the DB container
   list          List all instances
+  ports         Show all used ports & detect conflicts
   ui            Manage the web UI (start|stop|status|restart)
 
 Options (init):
@@ -46,6 +53,12 @@ Options (init):
   --db <name>                         Database name to create
   --root-password <pw>                Root password (default: root)
 
+Options (creds):
+  list                                List all DB users
+  create <user> <password> [--db <name>] [--privileges <privs>]
+  drop <user>
+  passwd <user> <new-password>
+
 Options (ui):
   --username <user>                   UI admin username (default: admin)
   --password <pass>                   UI admin password (auto-generated if omitted)
@@ -55,7 +68,13 @@ Examples:
   dbserver gescom init --engine mariadb --version 11 --db gescom
   dbserver gescom up
   dbserver gescom seed gescom.sql
+  dbserver gescom backup
+  dbserver gescom exec "SHOW DATABASES"
+  dbserver gescom creds create devuser pass123 --db gescom --privileges "SELECT,INSERT,UPDATE"
+  dbserver gescom creds list
+  dbserver gescom clone gescom-copy
   dbserver list
+  dbserver ports
   dbserver ui start
   dbserver ui restart --password mypass 9090
 EOF
@@ -90,9 +109,54 @@ load_instance_env() {
 
 auto_port() {
     local base="$1"
-    local count
-    count=$(find "$INSTANCES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    echo $(( base + count * 10 ))
+    local candidate="$base"
+    while is_port_used "$candidate"; do
+        candidate=$(( candidate + 10 ))
+    done
+    echo "$candidate"
+}
+
+# Check if a port is already used by another dbserver instance
+is_port_used() {
+    local port="$1"
+    if [[ -d "$INSTANCES_DIR" ]]; then
+        for env_file in "$INSTANCES_DIR"/*/.env; do
+            [[ -f "$env_file" ]] || continue
+            if grep -qE "^DB_(ADMIN_)?PORT=$port$" "$env_file" 2>/dev/null; then
+                return 0
+            fi
+        done
+    fi
+    # Also check system-level port usage
+    if command -v ss &>/dev/null; then
+        ss -tlnH 2>/dev/null | grep -qE ":${port}\b" && return 0
+    elif command -v netstat &>/dev/null; then
+        netstat -tlnp 2>/dev/null | grep -qE ":${port}\b" && return 0
+    fi
+    return 1
+}
+
+# Validate that a specific port is free (for explicit --port flags)
+validate_port() {
+    local port="$1"
+    local name="${2:-}"
+    # Check other instances
+    if [[ -d "$INSTANCES_DIR" ]]; then
+        for dir in "$INSTANCES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            local inst_name
+            inst_name="$(basename "$dir")"
+            [[ "$inst_name" == "$name" ]] && continue
+            local env_file="$dir/.env"
+            [[ -f "$env_file" ]] || continue
+            local used_db_port used_admin_port
+            used_db_port=$(grep -oP '^DB_PORT=\K.*' "$env_file" 2>/dev/null || echo "")
+            used_admin_port=$(grep -oP '^DB_ADMIN_PORT=\K.*' "$env_file" 2>/dev/null || echo "")
+            if [[ "$used_db_port" == "$port" || "$used_admin_port" == "$port" ]]; then
+                die "Port $port is already used by instance '$inst_name'."
+            fi
+        done
+    fi
 }
 
 compose_cmd() {
@@ -225,6 +289,11 @@ cmd_init() {
     [[ -z "$db_port" ]]    && db_port=$(auto_port "$base_db_port")
     [[ -z "$admin_port" ]] && admin_port=$(auto_port "$base_admin_port")
 
+    # Validate explicit ports don't conflict
+    validate_port "$db_port" "$name"
+    validate_port "$admin_port" "$name"
+    [[ "$db_port" == "$admin_port" ]] && die "DB port and admin port cannot be the same ($db_port)."
+
     local dir
     dir="$(instance_dir "$name")"
 
@@ -296,8 +365,7 @@ cmd_up() {
             [[ "$seed_db" == "$seed_file" ]] && seed_db=""
 
             # Skip if already seeded (check log)
-            local seed_key="${seed_file}:${seed_db}"
-            if [[ -f "$seed_log" ]] && grep -qF "$seed_key" "$seed_log"; then
+            if [[ -f "$seed_log" ]] && grep -qF "| $seed_file | ${seed_db:-<default>}" "$seed_log"; then
                 echo "  Already seeded: $seed_file${seed_db:+ -> $seed_db}. Skipping."
                 continue
             fi
@@ -492,6 +560,401 @@ cmd_list() {
     done
 }
 
+# ── Port map ─────────────────────────────────────────────────────────────────
+
+cmd_ports() {
+    bold "Port allocation map:"
+    echo ""
+    printf "%-20s %-8s %-12s %-10s\n" "INSTANCE" "PORT" "TYPE" "STATUS"
+    printf "%-20s %-8s %-12s %-10s\n" "--------" "----" "----" "------"
+
+    if [[ -d "$INSTANCES_DIR" ]]; then
+        for dir in "$INSTANCES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            local inst_name
+            inst_name="$(basename "$dir")"
+            local env_file="$dir/.env"
+            [[ -f "$env_file" ]] || continue
+            (
+                set -a; source "$env_file"; set +a
+                local status="stopped"
+                local container="dbserver_${inst_name}-${DB_ENGINE:-mariadb}-1"
+                if docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
+                    status="running"
+                fi
+                printf "%-20s %-8s %-12s %-10s\n" "$inst_name" "${DB_PORT:-?}" "db" "$status"
+                printf "%-20s %-8s %-12s %-10s\n" "$inst_name" "${DB_ADMIN_PORT:-?}" "admin" "$status"
+            )
+        done
+    fi
+
+    # Check for conflicts
+    echo ""
+    local all_ports=()
+    if [[ -d "$INSTANCES_DIR" ]]; then
+        for env_file in "$INSTANCES_DIR"/*/.env; do
+            [[ -f "$env_file" ]] || continue
+            local p
+            p=$(grep -oP '^DB_PORT=\K.*' "$env_file" 2>/dev/null || true)
+            [[ -n "$p" ]] && all_ports+=("$p")
+            p=$(grep -oP '^DB_ADMIN_PORT=\K.*' "$env_file" 2>/dev/null || true)
+            [[ -n "$p" ]] && all_ports+=("$p")
+        done
+    fi
+
+    local sorted
+    sorted=$(printf '%s\n' "${all_ports[@]}" | sort)
+    local dupes
+    dupes=$(printf '%s\n' "${all_ports[@]}" | sort | uniq -d)
+    if [[ -n "$dupes" ]]; then
+        red "⚠  Port conflicts detected: $dupes"
+    else
+        green "✓ No port conflicts."
+    fi
+}
+
+# ── Backup ───────────────────────────────────────────────────────────────────
+
+cmd_backup() {
+    local name="$1"; shift
+    require_instance "$name"
+    load_instance_env "$name"
+
+    local db_target="${1:-${DB_DATABASE:-}}"
+    local container
+    container="$(get_db_container "$name")"
+
+    mkdir -p "$BACKUPS_DIR"
+    local timestamp
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+    local backup_file="$BACKUPS_DIR/${name}_${db_target:-all}_${timestamp}.sql"
+
+    bold "Backing up instance '$name'${db_target:+ database '$db_target'}..."
+
+    local dump_opts="--single-transaction --skip-lock-tables"
+
+    case "$DB_ENGINE" in
+        mariadb)
+            if [[ -n "$db_target" ]]; then
+                docker exec "$container" mariadb-dump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts "$db_target" > "$backup_file"
+            else
+                docker exec "$container" mariadb-dump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts --all-databases > "$backup_file"
+            fi
+            ;;
+        mysql)
+            if [[ -n "$db_target" ]]; then
+                docker exec "$container" mysqldump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts "$db_target" > "$backup_file"
+            else
+                docker exec "$container" mysqldump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts --all-databases > "$backup_file"
+            fi
+            ;;
+        postgres)
+            if [[ -n "$db_target" ]]; then
+                docker exec "$container" pg_dump -U "${DB_USER:-postgres}" "$db_target" > "$backup_file"
+            else
+                docker exec "$container" pg_dumpall -U "${DB_USER:-postgres}" > "$backup_file"
+            fi
+            ;;
+    esac
+
+    green "Backup saved: $backup_file ($(du -h "$backup_file" | cut -f1))"
+}
+
+# ── Clone ────────────────────────────────────────────────────────────────────
+
+cmd_clone() {
+    local name="$1"; shift
+    require_instance "$name"
+    load_instance_env "$name"
+
+    local target="${1:-}"
+    [[ -n "$target" ]] || die "Usage: dbserver $name clone <new-name>"
+    [[ "$target" =~ ^[a-zA-Z0-9_-]+$ ]] || die "Invalid target name: '$target'"
+    [[ -d "$(instance_dir "$target")" ]] && die "Instance '$target' already exists."
+
+    # Assign new ports
+    local base_db_port=23306
+    local base_admin_port=28080
+    [[ "$DB_ENGINE" == "postgres" ]] && base_db_port=25432
+    local new_db_port
+    new_db_port=$(auto_port "$base_db_port")
+    local new_admin_port
+    new_admin_port=$(auto_port "$base_admin_port")
+
+    bold "Cloning '$name' → '$target'..."
+
+    # Create the new instance directory
+    mkdir -p "$(instance_dir "$target")"
+
+    # Copy and update .env
+    sed \
+        -e "s|^PROJECT_NAME=.*|PROJECT_NAME=$target|" \
+        -e "s|^DB_PORT=.*|DB_PORT=$new_db_port|" \
+        -e "s|^DB_ADMIN_PORT=.*|DB_ADMIN_PORT=$new_admin_port|" \
+        -e 's/\r$//' \
+        "$(instance_env "$name")" > "$(instance_env "$target")"
+
+    # Backup and seed if source is running
+    local container
+    container="$(get_db_container "$name")"
+    if docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
+        yellow "Source is running — dumping data..."
+        mkdir -p "$BACKUPS_DIR"
+        local dump_file="$BACKUPS_DIR/_clone_${name}_to_${target}.sql"
+        local dump_opts="--single-transaction --skip-lock-tables"
+        case "$DB_ENGINE" in
+            mariadb)
+                docker exec "$container" mariadb-dump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts --all-databases > "$dump_file" ;;
+            mysql)
+                docker exec "$container" mysqldump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts --all-databases > "$dump_file" ;;
+            postgres)
+                docker exec "$container" pg_dumpall -U "${DB_USER:-postgres}" > "$dump_file" ;;
+        esac
+
+        # Start target, wait for ready, import
+        compose_cmd "$target" up -d
+        local retries=30
+        local target_container="dbserver_${target}-${DB_ENGINE}-1"
+        case "$DB_ENGINE" in
+            mariadb)
+                while ! docker exec "$target_container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" -e "SELECT 1" &>/dev/null && [[ $retries -gt 0 ]]; do
+                    sleep 2; retries=$((retries - 1))
+                done ;;
+            mysql)
+                while ! docker exec "$target_container" mysql -uroot -p"${DB_ROOT_PASSWORD}" -e "SELECT 1" &>/dev/null && [[ $retries -gt 0 ]]; do
+                    sleep 2; retries=$((retries - 1))
+                done ;;
+            postgres)
+                while ! docker exec "$target_container" pg_isready -U "${DB_USER:-postgres}" &>/dev/null && [[ $retries -gt 0 ]]; do
+                    sleep 2; retries=$((retries - 1))
+                done ;;
+        esac
+
+        bold "Importing data into '$target'..."
+        case "$DB_ENGINE" in
+            mariadb)
+                docker exec -i "$target_container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" < "$dump_file" ;;
+            mysql)
+                docker exec -i "$target_container" mysql -uroot -p"${DB_ROOT_PASSWORD}" < "$dump_file" ;;
+            postgres)
+                docker exec -i "$target_container" psql -U "${DB_USER:-postgres}" < "$dump_file" ;;
+        esac
+
+        rm -f "$dump_file"
+        green "Clone '$target' is up with data from '$name'."
+    else
+        green "Clone '$target' created (source was stopped — no data copied)."
+    fi
+
+    echo "  DB port:    $new_db_port"
+    echo "  Admin port: $new_admin_port"
+}
+
+# ── Exec SQL ─────────────────────────────────────────────────────────────────
+
+cmd_exec() {
+    local name="$1"; shift
+    require_instance "$name"
+    load_instance_env "$name"
+
+    local sql=""
+    local db_target="${DB_DATABASE:-}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --db) db_target="$2"; shift 2 ;;
+            *)    sql="$1"; shift ;;
+        esac
+    done
+
+    [[ -n "$sql" ]] || die "Usage: dbserver $name exec \"<SQL>\" [--db <database>]"
+
+    local container
+    container="$(get_db_container "$name")"
+
+    case "$DB_ENGINE" in
+        mariadb)
+            docker exec -i "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" \
+                ${db_target:+"$db_target"} -e "$sql"
+            ;;
+        mysql)
+            docker exec -i "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" \
+                ${db_target:+"$db_target"} -e "$sql"
+            ;;
+        postgres)
+            docker exec -i "$container" psql -U "${DB_USER:-postgres}" \
+                -d "${db_target:-postgres}" -c "$sql"
+            ;;
+    esac
+}
+
+# ── Credentials manager ─────────────────────────────────────────────────────
+
+cmd_creds() {
+    local name="$1"; shift
+    require_instance "$name"
+    load_instance_env "$name"
+
+    local action="${1:-list}"; shift || true
+
+    local container
+    container="$(get_db_container "$name")"
+
+    case "$action" in
+        list)
+            bold "Users on instance '$name' (${DB_ENGINE}):"
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" \
+                        -e "SELECT User, Host, IF(Super_priv='Y','SUPER','') AS Super FROM mysql.user ORDER BY User;" 2>/dev/null
+                    ;;
+                mysql)
+                    docker exec "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" \
+                        -e "SELECT User, Host, IF(Super_priv='Y','SUPER','') AS Super FROM mysql.user ORDER BY User;" 2>/dev/null
+                    ;;
+                postgres)
+                    docker exec "$container" psql -U "${DB_USER:-postgres}" \
+                        -c "SELECT usename AS \"User\", CASE WHEN usesuper THEN 'SUPER' ELSE '' END AS \"Super\", valuntil AS \"Expires\" FROM pg_user ORDER BY usename;"
+                    ;;
+            esac
+            ;;
+        create)
+            local user="${1:-}"; shift || true
+            local password="${1:-}"; shift || true
+            local db="" privileges="ALL"
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --db) db="$2"; shift 2 ;;
+                    --privileges) privileges="$2"; shift 2 ;;
+                    *) die "Unknown option: $1" ;;
+                esac
+            done
+
+            [[ -n "$user" && -n "$password" ]] || die "Usage: dbserver $name creds create <user> <password> [--db <db>] [--privileges <privs>]"
+
+            local grant_db="${db:-*}"
+
+            bold "Creating user '$user' on instance '$name'..."
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${password}'; GRANT ${privileges} ON \`${grant_db}\`.* TO '${user}'@'%'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                mysql)
+                    docker exec "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${password}'; GRANT ${privileges} ON \`${grant_db}\`.* TO '${user}'@'%'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                postgres)
+                    docker exec "$container" psql -U "${DB_USER:-postgres}" -c \
+                        "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${user}') THEN CREATE ROLE \"${user}\" LOGIN PASSWORD '${password}'; END IF; END \$\$;"
+                    if [[ -n "$db" ]]; then
+                        docker exec "$container" psql -U "${DB_USER:-postgres}" -c \
+                            "GRANT ALL PRIVILEGES ON DATABASE \"${db}\" TO \"${user}\";"
+                    fi
+                    ;;
+            esac
+            green "User '$user' created."
+
+            # Save to instance credentials file
+            local creds_file
+            creds_file="$(instance_dir "$name")/.credentials"
+            echo "$(date -u '+%Y-%m-%d %H:%M:%S') | $user | ${db:-*} | $privileges" >> "$creds_file"
+            ;;
+        drop)
+            local user="${1:-}"
+            [[ -n "$user" ]] || die "Usage: dbserver $name creds drop <user>"
+
+            bold "Dropping user '$user' on instance '$name'..."
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "DROP USER IF EXISTS '${user}'@'%'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                mysql)
+                    docker exec "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "DROP USER IF EXISTS '${user}'@'%'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                postgres)
+                    docker exec "$container" psql -U "${DB_USER:-postgres}" -c \
+                        "DROP ROLE IF EXISTS \"${user}\";"
+                    ;;
+            esac
+            green "User '$user' dropped."
+            ;;
+        passwd)
+            local user="${1:-}"; shift || true
+            local new_password="${1:-}"
+            [[ -n "$user" && -n "$new_password" ]] || die "Usage: dbserver $name creds passwd <user> <new-password>"
+
+            bold "Changing password for '$user' on instance '$name'..."
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "ALTER USER '${user}'@'%' IDENTIFIED BY '${new_password}'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                mysql)
+                    docker exec "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "ALTER USER '${user}'@'%' IDENTIFIED BY '${new_password}'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                postgres)
+                    docker exec "$container" psql -U "${DB_USER:-postgres}" -c \
+                        "ALTER ROLE \"${user}\" PASSWORD '${new_password}';"
+                    ;;
+            esac
+            green "Password changed for '$user'."
+            ;;
+        grants)
+            local user="${1:-}"
+            [[ -n "$user" ]] || die "Usage: dbserver $name creds grants <user>"
+
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "SHOW GRANTS FOR '${user}'@'%';" 2>/dev/null
+                    ;;
+                mysql)
+                    docker exec "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "SHOW GRANTS FOR '${user}'@'%';" 2>/dev/null
+                    ;;
+                postgres)
+                    docker exec "$container" psql -U "${DB_USER:-postgres}" -c \
+                        "SELECT grantor, grantee, table_catalog, table_schema, privilege_type FROM information_schema.role_table_grants WHERE grantee='${user}';"
+                    ;;
+            esac
+            ;;
+        root-passwd)
+            local new_password="${1:-}"
+            [[ -n "$new_password" ]] || die "Usage: dbserver $name creds root-passwd <new-password>"
+
+            bold "Changing root password on instance '$name'..."
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "ALTER USER 'root'@'%' IDENTIFIED BY '${new_password}'; ALTER USER 'root'@'localhost' IDENTIFIED BY '${new_password}'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                mysql)
+                    docker exec "$container" mysql -uroot -p"${DB_ROOT_PASSWORD}" -e \
+                        "ALTER USER 'root'@'%' IDENTIFIED BY '${new_password}'; ALTER USER 'root'@'localhost' IDENTIFIED BY '${new_password}'; FLUSH PRIVILEGES;" 2>/dev/null
+                    ;;
+                postgres)
+                    docker exec "$container" psql -U "${DB_USER:-postgres}" -c \
+                        "ALTER ROLE \"${DB_USER:-postgres}\" PASSWORD '${new_password}';"
+                    ;;
+            esac
+
+            # Update .env file
+            local env_file
+            env_file="$(instance_env "$name")"
+            sed -i "s|^DB_ROOT_PASSWORD=.*|DB_ROOT_PASSWORD=${new_password}|" "$env_file"
+            green "Root password changed and .env updated."
+            ;;
+        *)
+            die "Unknown creds action: $action. Use list|create|drop|passwd|grants|root-passwd"
+            ;;
+    esac
+}
+
 cmd_ui() {
     local action="start"
     local port="${DBSERVER_UI_PORT:-8888}"
@@ -552,7 +1015,7 @@ cmd_ui() {
                 DBSERVER_UI_PORT="$port" \
                 DBSERVER_UI_USERNAME="$DBSERVER_UI_USERNAME" \
                 DBSERVER_UI_PASSWORD="$DBSERVER_UI_PASSWORD" \
-                node "$PROJECT_DIR/web-ui/server.js" > "$UI_LOG_FILE" 2>&1 &
+                node "$PROJECT_DIR/web-ui/server.cjs" > "$UI_LOG_FILE" 2>&1 &
             local ui_pid=$!
             echo "$ui_pid" > "$UI_PID_FILE"
             sleep 1
@@ -620,9 +1083,14 @@ cmd_ui() {
 
 [[ $# -ge 1 ]] || usage
 
-# Special cases without instance name: `dbserver list` and `dbserver ui`
+# Special cases without instance name: `dbserver list`, `dbserver ports`, and `dbserver ui`
 if [[ "$1" == "list" ]]; then
     cmd_list
+    exit 0
+fi
+
+if [[ "$1" == "ports" ]]; then
+    cmd_ports
     exit 0
 fi
 
@@ -651,6 +1119,10 @@ case "$COMMAND" in
     destroy) cmd_destroy "$INSTANCE_NAME" "$@" ;;
     status)  cmd_status  "$INSTANCE_NAME" "$@" ;;
     seed)    cmd_seed    "$INSTANCE_NAME" "$@" ;;
+    backup)  cmd_backup  "$INSTANCE_NAME" "$@" ;;
+    clone)   cmd_clone   "$INSTANCE_NAME" "$@" ;;
+    exec)    cmd_exec    "$INSTANCE_NAME" "$@" ;;
+    creds)   cmd_creds   "$INSTANCE_NAME" "$@" ;;
     logs)    cmd_logs    "$INSTANCE_NAME" "$@" ;;
     shell)   cmd_shell   "$INSTANCE_NAME" "$@" ;;
     *)       die "Unknown command: $COMMAND. Run 'dbserver help' for usage." ;;

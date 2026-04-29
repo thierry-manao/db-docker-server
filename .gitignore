@@ -1,5 +1,9 @@
 .env
 db-data/
 instances/
-seed/
+seed/*.sql
+seed/*.gz
+backups/
 .dbserver-ui*
+web-ui/node_modules/
+web-ui/dist/
