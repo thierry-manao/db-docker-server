@@ -77,8 +77,8 @@ export default function Dashboard() {
             const isPending = !!pending[inst.name];
             const adminLabel = c.DB_ENGINE === 'postgres' ? 'pgAdmin' : 'phpMyAdmin';
             const connString = c.DB_ENGINE === 'postgres'
-              ? `psql -h localhost -p ${c.DB_PORT} -U ${c.DB_USER || 'postgres'} ${c.DB_DATABASE || ''}`
-              : `mysql -h 127.0.0.1 -P ${c.DB_PORT} -u root -p${c.DB_ROOT_PASSWORD || 'root'} ${c.DB_DATABASE || ''}`;
+              ? `psql -h ${window.location.hostname} -p ${c.DB_PORT} -U ${c.DB_USER || 'postgres'} ${c.DB_DATABASE || ''}`
+              : `mysql -h ${window.location.hostname} -P ${c.DB_PORT} -u root -p${c.DB_ROOT_PASSWORD || 'root'} ${c.DB_DATABASE || ''}`;
 
             return (
               <div key={inst.name} className="card" style={inst.running ? { borderLeft: '3px solid var(--success)' } : {}}>
@@ -120,7 +120,7 @@ export default function Dashboard() {
                         <button className="btn btn-danger btn-sm" disabled={isPending} onClick={() => runAction(inst.name, 'down')}>
                           <Square size={12} /> Arrêter
                         </button>
-                        <a className="btn btn-outline btn-sm" href={`http://localhost:${c.DB_ADMIN_PORT}`} target="_blank" rel="noreferrer">
+                        <a className="btn btn-outline btn-sm" href={`http://${window.location.hostname}:${c.DB_ADMIN_PORT}`} target="_blank" rel="noreferrer">
                           {adminLabel}
                         </a>
                       </>

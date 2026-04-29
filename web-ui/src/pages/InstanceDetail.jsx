@@ -22,8 +22,8 @@ export default function InstanceDetail() {
   const c = inst.config;
   const adminLabel = c.DB_ENGINE === 'postgres' ? 'pgAdmin' : 'phpMyAdmin';
   const connString = c.DB_ENGINE === 'postgres'
-    ? `psql -h localhost -p ${c.DB_PORT} -U ${c.DB_USER || 'postgres'} ${c.DB_DATABASE || ''}`
-    : `mysql -h 127.0.0.1 -P ${c.DB_PORT} -u root -p${c.DB_ROOT_PASSWORD || 'root'} ${c.DB_DATABASE || ''}`;
+    ? `psql -h ${window.location.hostname} -p ${c.DB_PORT} -U ${c.DB_USER || 'postgres'} ${c.DB_DATABASE || ''}`
+    : `mysql -h ${window.location.hostname} -P ${c.DB_PORT} -u root -p${c.DB_ROOT_PASSWORD || 'root'} ${c.DB_DATABASE || ''}`;
 
   const runAction = async (action, body) => {
     setPending(action);
@@ -113,7 +113,7 @@ function OverviewTab({ inst, connString, adminLabel, toast }) {
           <tbody>
             <tr><td className="text-muted">Moteur</td><td className="font-medium">{c.DB_ENGINE}:{c.DB_VERSION}</td></tr>
             <tr><td className="text-muted">Port DB</td><td className="font-mono">{c.DB_PORT}</td></tr>
-            <tr><td className="text-muted">Port Admin</td><td><a href={`http://localhost:${c.DB_ADMIN_PORT}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{c.DB_ADMIN_PORT} ({adminLabel})</a></td></tr>
+            <tr><td className="text-muted">Port Admin</td><td><a href={`http://${window.location.hostname}:${c.DB_ADMIN_PORT}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{c.DB_ADMIN_PORT} ({adminLabel})</a></td></tr>
             <tr><td className="text-muted">Base</td><td>{c.DB_DATABASE || <span className="text-muted">—</span>}</td></tr>
             <tr><td className="text-muted">Root password</td><td className="font-mono">{c.DB_ROOT_PASSWORD || 'root'}</td></tr>
             {c.DB_USER && <tr><td className="text-muted">Utilisateur</td><td>{c.DB_USER}</td></tr>}
