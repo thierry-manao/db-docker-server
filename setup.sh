@@ -164,6 +164,52 @@ info "Building frontend..."
 cd web-ui && npm run build --silent && cd ..
 ok "Frontend built ✓"
 
+# ── Install systemd service ──────────────────────────────────────────────────
+
+SERVICE_NAME="dbserver-ui"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+NODE_BIN="$(command -v node)"
+UI_PORT="${DBSERVER_UI_PORT:-8888}"
+
+info "Installing systemd service (${SERVICE_NAME})..."
+
+sudo tee "$SERVICE_FILE" > /dev/null <<EOF
+[Unit]
+Description=db-docker-server Web UI
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=${SCRIPT_DIR}
+ExecStart=${NODE_BIN} ${SCRIPT_DIR}/web-ui/server.cjs
+Restart=always
+RestartSec=5
+Environment=DBSERVER_UI_PORT=${UI_PORT}
+Environment=DBSERVER_PG_HOST=localhost
+Environment=DBSERVER_PG_PORT=${PG_PORT}
+Environment=DBSERVER_PG_USER=${PG_USER}
+Environment=DBSERVER_PG_PASSWORD=${PG_PASSWORD}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=${SERVICE_NAME}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME"
+sudo systemctl start "$SERVICE_NAME"
+
+# Check if it started OK
+sleep 2
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+    ok "Service ${SERVICE_NAME} is running ✓"
+else
+    warn "Service may have failed to start. Check: journalctl -u ${SERVICE_NAME} -f"
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -171,10 +217,11 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║          db-docker-server setup complete         ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC}                                                  ${GREEN}║${NC}"
-echo -e "${GREEN}║${NC}  Start the server:                               ${GREEN}║${NC}"
-echo -e "${GREEN}║${NC}    node web-ui/server.cjs                        ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Service:     ${CYAN}systemctl status dbserver-ui${NC}       ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Logs:        ${CYAN}journalctl -u dbserver-ui -f${NC}       ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Restart:     ${CYAN}systemctl restart dbserver-ui${NC}      ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}                                                  ${GREEN}║${NC}"
-echo -e "${GREEN}║${NC}  Default UI:  ${CYAN}http://localhost:8888${NC}              ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  Default UI:  ${CYAN}http://localhost:${UI_PORT}${NC}              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  Login:       ${YELLOW}admin / admin${NC}                     ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}                                                  ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  ${RED}⚠  You will be forced to change passwords${NC}      ${GREEN}║${NC}"
