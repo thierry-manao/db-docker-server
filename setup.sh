@@ -25,7 +25,7 @@ ok "docker, docker compose, node v$(node -v) ✓"
 # ── Install npm dependencies ─────────────────────────────────────────────────
 
 info "Installing npm dependencies..."
-cd web-ui && npm install --omit=dev --silent && cd ..
+cd web-ui && npm install --silent && cd ..
 ok "npm dependencies installed ✓"
 
 # ── Environment file ─────────────────────────────────────────────────────────
@@ -163,6 +163,10 @@ ok "Database initialized ✓"
 info "Building frontend..."
 cd web-ui && npm run build --silent && cd ..
 ok "Frontend built ✓"
+
+info "Pruning dev dependencies..."
+cd web-ui && npm prune --omit=dev --silent && cd ..
+ok "Dev dependencies removed ✓"
 
 # ── Install systemd service ──────────────────────────────────────────────────
 
