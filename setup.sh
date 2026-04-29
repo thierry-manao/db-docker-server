@@ -131,11 +131,11 @@ function hashPassword(plain) {
         console.log('  Admin table already has users, skipping seed');
     }
 
-    // Mark setup_required
+    // Mark setup_required only on first run
     await pool.query(
-        \"INSERT INTO config (key, value) VALUES ('setup_required', 'true') ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()\"
+        \"INSERT INTO config (key, value) VALUES ('setup_required', 'true') ON CONFLICT (key) DO NOTHING\"
     );
-    console.log('  Setup flag set — UI will force reconfiguration');
+    console.log('  Setup flag checked');
 
     // Seed default MinIO config
     const minio = {
