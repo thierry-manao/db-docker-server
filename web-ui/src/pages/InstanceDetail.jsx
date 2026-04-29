@@ -30,6 +30,7 @@ export default function InstanceDetail() {
     try {
       const result = await api.instanceAction(name, action, body);
       toast(result.message || `${action} terminé`);
+      if (action === 'destroy') { refresh(); navigate('/'); return; }
     } catch (err) { toast(`${action} échoué: ${err.message}`, 'danger'); }
     finally { setPending(null); refresh(); }
   };

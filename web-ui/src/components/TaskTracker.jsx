@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api';
 import { Loader, CheckCircle, XCircle, X, ListTodo } from 'lucide-react';
 
 export default function TaskTracker({ toast }) {
   const [tasks, setTasks] = useState([]);
   const [open, setOpen] = useState(false);
+  const notifiedRef = useRef(new Set());
 
   const poll = useCallback(async () => {
     try {
@@ -22,13 +23,13 @@ export default function TaskTracker({ toast }) {
   // Auto-toast on task completion
   useEffect(() => {
     for (const t of tasks) {
-      if (t.status === 'done' && !t._notified) {
-        t._notified = true;
-        toast?.(`${t.label} — terminé`);
-      }
-      if (t.status === 'error' && !t._notified) {
-        t._notified = true;
-        toast?.(`${t.label} — erreur`, 'danger');
+      if ((t.status === 'done' || t.status === 'error') && !notifiedRef.current.has(t.id)) {
+        notifiedRef.current.add(t.id);
+        if (t.status === 'done') {
+          toast?.(`${t.label} — terminé`);
+        } else {
+          toast?.(`${t.label} — erreur`, 'danger');
+        }
       }
     }
   }, [tasks, toast]);
