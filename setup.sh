@@ -16,16 +16,24 @@ fail()  { echo -e "${RED}[setup]${NC} $*"; exit 1; }
 if [[ "${1:-}" == "update" ]]; then
     info "Updating db-docker-server..."
 
+    # Ensure node/npm are in PATH (nvm, fnm, volta, or /usr/local)
+    for p in "$HOME/.nvm/versions/node"/*/bin "$HOME/.local/share/fnm/aliases/default/bin" "$HOME/.volta/bin" /usr/local/bin; do
+        [[ -d "$p" ]] && export PATH="$p:$PATH" && break
+    done
+    command -v npm >/dev/null 2>&1 || fail "npm not found. Install Node.js on this server."
+
+    [[ -d "$SCRIPT_DIR/web-ui" ]] || fail "web-ui directory not found in $SCRIPT_DIR"
+
     info "Installing npm dependencies..."
-    cd web-ui && npm install --silent && cd ..
+    (cd "$SCRIPT_DIR/web-ui" && npm install --silent)
     ok "npm dependencies installed ✓"
 
     info "Building frontend..."
-    cd web-ui && npm run build --silent && cd ..
+    (cd "$SCRIPT_DIR/web-ui" && npm run build --silent)
     ok "Frontend built ✓"
 
     info "Pruning dev dependencies..."
-    cd web-ui && npm prune --omit=dev --silent && cd ..
+    (cd "$SCRIPT_DIR/web-ui" && npm prune --omit=dev --silent)
     ok "Dev dependencies removed ✓"
 
     # Restart service if systemd is available

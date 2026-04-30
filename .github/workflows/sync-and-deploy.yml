@@ -22,7 +22,10 @@ jobs:
           port: ${{ vars.SSH_PORT || 22 }}
           script: |
             set -euo pipefail
+            echo "[deploy] INSTALL_PATH=${{ vars.INSTALL_PATH }}"
+            echo "[deploy] PWD before cd: $(pwd)"
             cd ${{ vars.INSTALL_PATH }}
+            echo "[deploy] PWD after cd: $(pwd)"
             echo "[deploy] Pulling latest..."
             git fetch origin main
             git reset --hard origin/main
