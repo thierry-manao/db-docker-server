@@ -551,13 +551,16 @@ function MetricsTab({ name, inst }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [sqLoading, setSqLoading] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [range, setRange] = useState('all'); // 'all', '5m', '10m', '15m'
+  const [visibleSeries, setVisibleSeries] = useState({ cpu: true, mem: true, queries: true, connections: true });
+  const refreshRef = useRef(null);
 
   const loadMetrics = async () => {
-    setLoading(true);
-    setError(null);
     try {
       const data = await api.getMetrics(name);
       setMetrics(data);
+      setError(null);
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
   };
@@ -571,7 +574,19 @@ function MetricsTab({ name, inst }) {
     finally { setSqLoading(false); }
   };
 
-  useEffect(() => { loadMetrics(); loadSlowQueries(); }, [name]);
+  useEffect(() => {
+    setLoading(true);
+    loadMetrics();
+    loadSlowQueries();
+  }, [name]);
+
+  // Auto-refresh every 30s
+  useEffect(() => {
+    if (autoRefresh) {
+      refreshRef.current = setInterval(() => { loadMetrics(); }, 30000);
+    }
+    return () => { if (refreshRef.current) clearInterval(refreshRef.current); };
+  }, [autoRefresh, name]);
 
   if (loading) return <div className="card card-body text-center"><span className="spinner" /> Chargement des métriques...</div>;
   if (error) return <div className="card card-body text-danger">{error}</div>;
@@ -594,67 +609,114 @@ function MetricsTab({ name, inst }) {
     return `${Math.floor(s / 86400)}j ${Math.floor((s % 86400) / 3600)}h`;
   };
 
-  // Prepare time series chart data
-  const chartData = (metrics.timeSeries || []).map(p => ({
-    time: new Date(p.ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+  // Filter time series by range
+  const rangeMs = { 'all': Infinity, '5m': 5 * 60000, '10m': 10 * 60000, '15m': 15 * 60000 };
+  const now = Date.now();
+  const cutoff = now - (rangeMs[range] || Infinity);
+  const filteredSeries = (metrics.timeSeries || []).filter(p => p.ts >= cutoff);
+
+  const chartData = filteredSeries.map(p => ({
+    time: new Date(p.ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     cpu: p.cpu,
     mem: p.mem,
     queries: p.queries,
     connections: p.connections
   }));
 
+  const toggleSeries = (key) => setVisibleSeries(v => ({ ...v, [key]: !v[key] }));
+
   return (
     <div className="grid grid-1 gap-4">
       {/* Charts Section */}
-      {chartData.length > 1 && (
-        <div className="grid grid-2 gap-4">
-          {/* CPU & Memory Chart */}
-          <div className="card card-body">
-            <h4 className="text-sm font-semibold mb-3">CPU & Mémoire (%)</h4>
-            <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-                <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="#888" />
-                <YAxis domain={[0, 'auto']} tick={{ fontSize: 11 }} stroke="#888" unit="%" />
-                <Tooltip contentStyle={{ background: '#1e1e2e', border: '1px solid #444' }} />
-                <Legend />
-                <Area type="monotone" dataKey="cpu" name="CPU" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.15} strokeWidth={2} />
-                <Area type="monotone" dataKey="mem" name="Mémoire" stroke="#6366f1" fill="#6366f1" fillOpacity={0.15} strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* Queries & Connections Chart */}
-          <div className="card card-body">
-            <h4 className="text-sm font-semibold mb-3">Requêtes & Connexions</h4>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-                <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="#888" />
-                <YAxis tick={{ fontSize: 11 }} stroke="#888" />
-                <Tooltip contentStyle={{ background: '#1e1e2e', border: '1px solid #444' }} />
-                <Legend />
-                <Line type="monotone" dataKey="queries" name="Requêtes (cumul)" stroke="#10b981" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="connections" name="Connexions" stroke="#ef4444" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+      <div className="card card-body">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h4 className="text-sm font-semibold">Graphiques temps réel</h4>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Series toggles */}
+            <div className="flex gap-1">
+              {[
+                { key: 'cpu', label: 'CPU', color: '#f59e0b' },
+                { key: 'mem', label: 'Mém', color: '#6366f1' },
+                { key: 'queries', label: 'Req', color: '#10b981' },
+                { key: 'connections', label: 'Conn', color: '#ef4444' },
+              ].map(s => (
+                <button key={s.key}
+                  className={`btn btn-sm ${visibleSeries[s.key] ? '' : 'btn-ghost'}`}
+                  style={visibleSeries[s.key] ? { background: s.color + '22', border: `1px solid ${s.color}`, color: s.color } : {}}
+                  onClick={() => toggleSeries(s.key)}
+                >{s.label}</button>
+              ))}
+            </div>
+            {/* Range selector */}
+            <select className="input input-sm" style={{ width: 'auto', padding: '2px 8px' }}
+              value={range} onChange={e => setRange(e.target.value)}>
+              <option value="all">Tout</option>
+              <option value="5m">5 min</option>
+              <option value="10m">10 min</option>
+              <option value="15m">15 min</option>
+            </select>
+            {/* Auto-refresh toggle */}
+            <label className="flex items-center gap-1 text-xs text-muted" style={{ cursor: 'pointer' }}>
+              <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} />
+              Auto 30s
+            </label>
+            {/* Manual refresh */}
+            <button className="btn btn-ghost btn-sm" onClick={() => { loadMetrics(); loadSlowQueries(); }}>↻</button>
           </div>
         </div>
-      )}
 
-      {chartData.length <= 1 && metrics.container && (
-        <div className="card card-body text-center text-muted text-sm">
-          Les graphiques apparaîtront après quelques minutes de collecte (intervalle: 30s)
-        </div>
-      )}
+        {chartData.length > 0 ? (
+          <div className="grid grid-2 gap-4">
+            {/* CPU & Memory Chart */}
+            {(visibleSeries.cpu || visibleSeries.mem) && (
+              <div>
+                <p className="text-xs text-muted mb-1">CPU & Mémoire (%)</p>
+                <ResponsiveContainer width="100%" height={200}>
+                  <AreaChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                    <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="#888" />
+                    <YAxis domain={[0, 'auto']} tick={{ fontSize: 10 }} stroke="#888" unit="%" />
+                    <Tooltip contentStyle={{ background: '#1e1e2e', border: '1px solid #444', fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    {visibleSeries.cpu && <Area type="monotone" dataKey="cpu" name="CPU" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.15} strokeWidth={2} dot={chartData.length < 10} />}
+                    {visibleSeries.mem && <Area type="monotone" dataKey="mem" name="Mémoire" stroke="#6366f1" fill="#6366f1" fillOpacity={0.15} strokeWidth={2} dot={chartData.length < 10} />}
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Queries & Connections Chart */}
+            {(visibleSeries.queries || visibleSeries.connections) && (
+              <div>
+                <p className="text-xs text-muted mb-1">Requêtes & Connexions</p>
+                <ResponsiveContainer width="100%" height={200}>
+                  <LineChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                    <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="#888" />
+                    <YAxis tick={{ fontSize: 10 }} stroke="#888" />
+                    <Tooltip contentStyle={{ background: '#1e1e2e', border: '1px solid #444', fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    {visibleSeries.queries && <Line type="monotone" dataKey="queries" name="Requêtes (cumul)" stroke="#10b981" strokeWidth={2} dot={chartData.length < 10} />}
+                    {visibleSeries.connections && <Line type="monotone" dataKey="connections" name="Connexions" stroke="#ef4444" strokeWidth={2} dot={chartData.length < 10} />}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-muted text-sm text-center">
+            {metrics.container ? `En attente de données... (${(metrics.timeSeries || []).length} point(s) collecté(s), intervalle: 30s)` : 'Instance arrêtée'}
+          </p>
+        )}
+        {chartData.length > 0 && (
+          <p className="text-xs text-muted mt-2 text-center">{chartData.length} point(s) affichés — collecte toutes les 30s</p>
+        )}
+      </div>
 
       <div className="grid grid-2 gap-4">
         {/* Container Resources */}
         <div className="card card-body">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="text-sm font-semibold">Ressources conteneur</h4>
-            <button className="btn btn-ghost btn-sm" onClick={() => { loadMetrics(); loadSlowQueries(); }}>↻</button>
-          </div>
+          <h4 className="text-sm font-semibold mb-3">Ressources conteneur</h4>
           {metrics.container ? (
             <table className="table">
               <tbody>

@@ -607,7 +607,8 @@ async function collectMetricsSnapshot(instanceName, engine, config) {
 
         h.snapshots.push({ ts: Date.now(), cpu, mem, queries, connections });
         if (h.snapshots.length > METRICS_MAX_SNAPSHOTS) h.snapshots.shift();
-    } catch { /* instance not running, skip */ }
+        if (h.snapshots.length <= 3) console.log(`[metrics] ${instanceName}: cpu=${cpu}% mem=${mem}% queries=${queries} conns=${connections} (${h.snapshots.length} snapshots)`);
+    } catch (err) { /* instance not running or stats failed */ }
 }
 
 // Periodic metrics collector
@@ -615,6 +616,15 @@ let metricsCollectorInterval = null;
 
 async function startMetricsCollector() {
     if (metricsCollectorInterval) return;
+    // Collect immediately on start
+    try {
+        const instances = await listInstances();
+        for (const inst of instances) {
+            if (!inst.running) continue;
+            const engine = inst.config.DB_ENGINE || 'mariadb';
+            collectMetricsSnapshot(inst.name, engine, inst.config).catch(() => {});
+        }
+    } catch {}
     metricsCollectorInterval = setInterval(async () => {
         try {
             const instances = await listInstances();
