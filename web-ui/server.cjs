@@ -844,7 +844,36 @@ async function handleRequest(req, res) {
 
     // ── Instance actions ─────────────────────────────────────────────────────
 
-    const actionMatch = url.pathname.match(/^\/api\/instances\/([a-zA-Z0-9_-]+)\/actions\/(up|down|destroy|seed|backup|clone|exec)$/);
+    // List databases (GET)
+    const dbsMatch = url.pathname.match(/^\/api\/instances\/([a-zA-Z0-9_-]+)\/databases$/);
+    if (req.method === 'GET' && dbsMatch) {
+        const name = dbsMatch[1];
+        const inst = await getInstance(name);
+        const engine = inst.config.DB_ENGINE || 'mariadb';
+        const container = `dbserver_${name}-${engine}-1`;
+        try {
+            let cmd, cmdArgs;
+            if (engine === 'postgres') {
+                cmd = USE_WSL ? 'wsl' : 'docker';
+                cmdArgs = USE_WSL
+                    ? ['docker', 'exec', container, 'psql', '-U', inst.config.DB_USER || 'postgres', '-t', '-A', '-c', "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres' ORDER BY datname;"]
+                    : ['exec', container, 'psql', '-U', inst.config.DB_USER || 'postgres', '-t', '-A', '-c', "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres' ORDER BY datname;"];
+            } else {
+                cmd = USE_WSL ? 'wsl' : 'docker';
+                cmdArgs = USE_WSL
+                    ? ['docker', 'exec', container, engine === 'mariadb' ? 'mariadb' : 'mysql', '-uroot', `-p${inst.config.DB_ROOT_PASSWORD}`, '-N', '-e', "SHOW DATABASES;"]
+                    : ['exec', container, engine === 'mariadb' ? 'mariadb' : 'mysql', '-uroot', `-p${inst.config.DB_ROOT_PASSWORD}`, '-N', '-e', "SHOW DATABASES;"];
+            }
+            const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 10000 });
+            const systemDbs = ['information_schema', 'performance_schema', 'mysql', 'sys'];
+            const databases = stdout.trim().split('\n').map(d => d.trim()).filter(d => d && !systemDbs.includes(d));
+            return sendJson(res, 200, { databases });
+        } catch (err) {
+            return sendJson(res, 500, { error: 'Could not list databases', details: err.message });
+        }
+    }
+
+    const actionMatch = url.pathname.match(/^\/api\/instances\/([a-zA-Z0-9_-]+)\/actions\/(up|down|destroy|seed|backup|databases|clone|exec)$/);
     if (req.method === 'POST' && actionMatch) {
         const name = actionMatch[1];
         const action = actionMatch[2];

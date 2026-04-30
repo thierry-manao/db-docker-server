@@ -11,6 +11,42 @@ ok()    { echo -e "${GREEN}[setup]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[setup]${NC} $*"; }
 fail()  { echo -e "${RED}[setup]${NC} $*"; exit 1; }
 
+# ── Update mode (rebuild frontend + restart service) ──────────────────────────
+
+if [[ "${1:-}" == "update" ]]; then
+    info "Updating db-docker-server..."
+
+    info "Installing npm dependencies..."
+    cd web-ui && npm install --silent && cd ..
+    ok "npm dependencies installed ✓"
+
+    info "Building frontend..."
+    cd web-ui && npm run build --silent && cd ..
+    ok "Frontend built ✓"
+
+    info "Pruning dev dependencies..."
+    cd web-ui && npm prune --omit=dev --silent && cd ..
+    ok "Dev dependencies removed ✓"
+
+    # Restart service if systemd is available
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled dbserver-ui >/dev/null 2>&1; then
+        info "Restarting dbserver-ui service..."
+        sudo systemctl restart dbserver-ui
+        sleep 2
+        if systemctl is-active --quiet dbserver-ui; then
+            ok "Service dbserver-ui restarted ✓"
+        else
+            warn "Service may have failed. Check: journalctl -u dbserver-ui -f"
+        fi
+    else
+        warn "No systemd service found. Restart the UI manually: dbserver ui restart"
+    fi
+
+    echo ""
+    ok "Update complete!"
+    exit 0
+fi
+
 # ── Check dependencies ────────────────────────────────────────────────────────
 
 info "Checking dependencies..."
