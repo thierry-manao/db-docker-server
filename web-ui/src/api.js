@@ -31,6 +31,7 @@ export const api = {
   // Actions
   instanceAction: (name, action, body) => request(`/api/instances/${name}/actions/${action}`, { method: 'POST', body: body ? JSON.stringify(body) : undefined }),
   listDatabases: (name) => request(`/api/instances/${name}/databases`),
+  getMetrics: (name) => request(`/api/instances/${name}/metrics`),
 
   // Credentials
   listCreds: (name) => request(`/api/instances/${name}/creds`),

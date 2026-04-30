@@ -137,6 +137,7 @@ export default function InstanceDetail() {
           ['seed', 'Seed / Import'],
           ['config', 'Configuration'],
           ['sql', 'SQL'],
+          ['metrics', 'Metrics'],
           ['logs', 'Logs'],
         ].map(([key, label]) => (
           <button key={key} className={`tab ${tab === key ? 'active' : ''}`} onClick={() => changeTab(key)}>
@@ -151,6 +152,7 @@ export default function InstanceDetail() {
       {tab === 'seed' && <SeedTab name={name} inst={inst} seedFiles={seedFiles} toast={toast} refresh={refresh} />}
       {tab === 'config' && <ConfigTab name={name} inst={inst} toast={toast} refresh={refresh} />}
       {tab === 'sql' && <SqlTab name={name} inst={inst} toast={toast} />}
+      {tab === 'metrics' && <MetricsTab name={name} inst={inst} />}
       {tab === 'logs' && <LogsTab name={name} />}
     </>
   );
@@ -538,6 +540,150 @@ function SqlTab({ name, inst, toast }) {
         </button>
       </div>
       {result && <div className="log-viewer">{result}</div>}
+    </div>
+  );
+}
+
+function MetricsTab({ name, inst }) {
+  const [metrics, setMetrics] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const loadMetrics = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.getMetrics(name);
+      setMetrics(data);
+    } catch (err) { setError(err.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { loadMetrics(); }, [name]);
+
+  if (loading) return <div className="card card-body text-center"><span className="spinner" /> Chargement des métriques...</div>;
+  if (error) return <div className="card card-body text-danger">{error}</div>;
+  if (!metrics) return null;
+
+  const formatBytes = (bytes) => {
+    if (!bytes) return '—';
+    const n = Number(bytes);
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+    return `${(n / 1073741824).toFixed(2)} GB`;
+  };
+
+  const formatUptime = (seconds) => {
+    const s = Number(seconds);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86400)}j ${Math.floor((s % 86400) / 3600)}h`;
+  };
+
+  return (
+    <div className="grid grid-2 gap-4">
+      {/* Container Resources */}
+      <div className="card card-body">
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="text-sm font-semibold">Ressources conteneur</h4>
+          <button className="btn btn-ghost btn-sm" onClick={loadMetrics}>↻</button>
+        </div>
+        {metrics.container ? (
+          <table className="table">
+            <tbody>
+              <tr><td className="text-muted">CPU</td><td className="font-mono">{metrics.container.cpu}</td></tr>
+              <tr><td className="text-muted">Mémoire</td><td className="font-mono">{metrics.container.memory}</td></tr>
+              <tr><td className="text-muted">Mém. %</td><td className="font-mono">{metrics.container.memPercent}</td></tr>
+              <tr><td className="text-muted">Réseau I/O</td><td className="font-mono">{metrics.container.netIO}</td></tr>
+              <tr><td className="text-muted">Disque I/O</td><td className="font-mono">{metrics.container.blockIO}</td></tr>
+              <tr><td className="text-muted">PIDs</td><td className="font-mono">{metrics.container.pids}</td></tr>
+              {metrics.disk && <tr><td className="text-muted">Données</td><td className="font-mono">{metrics.disk.dataDir}</td></tr>}
+            </tbody>
+          </table>
+        ) : <p className="text-muted text-sm">Instance arrêtée</p>}
+      </div>
+
+      {/* DB Engine Stats */}
+      <div className="card card-body">
+        <h4 className="text-sm font-semibold mb-3">Statistiques {metrics.engine}</h4>
+        {metrics.db && !metrics.db.error ? (
+          metrics.engine === 'postgres' ? (
+            <table className="table">
+              <tbody>
+                <tr><td className="text-muted">Uptime</td><td className="font-mono">{formatUptime(metrics.db.uptime)}</td></tr>
+                {metrics.db.connections && <>
+                  <tr><td className="text-muted">Connexions actives</td><td className="font-mono">{metrics.db.connections.active}</td></tr>
+                  <tr><td className="text-muted">Connexions idle</td><td className="font-mono">{metrics.db.connections.idle}</td></tr>
+                  <tr><td className="text-muted">Total / Max</td><td className="font-mono">{metrics.db.connections.total} / {metrics.db.connections.max}</td></tr>
+                </>}
+              </tbody>
+            </table>
+          ) : (
+            <table className="table">
+              <tbody>
+                <tr><td className="text-muted">Uptime</td><td className="font-mono">{formatUptime(metrics.db.uptime)}</td></tr>
+                <tr><td className="text-muted">Connexions</td><td className="font-mono">{metrics.db.connections} / {metrics.db.maxConnections}</td></tr>
+                <tr><td className="text-muted">Total requêtes</td><td className="font-mono">{Number(metrics.db.totalQueries).toLocaleString()}</td></tr>
+                <tr><td className="text-muted">Slow queries</td><td className="font-mono">{metrics.db.slowQueries}</td></tr>
+                <tr><td className="text-muted">Tables ouvertes</td><td className="font-mono">{metrics.db.openTables}</td></tr>
+                <tr><td className="text-muted">Trafic reçu</td><td className="font-mono">{formatBytes(metrics.db.bytesReceived)}</td></tr>
+                <tr><td className="text-muted">Trafic envoyé</td><td className="font-mono">{formatBytes(metrics.db.bytesSent)}</td></tr>
+                <tr><td className="text-muted">Connexions échouées</td><td className="font-mono">{metrics.db.abortedConnections}</td></tr>
+              </tbody>
+            </table>
+          )
+        ) : <p className="text-muted text-sm">{metrics.db?.error || 'Instance arrêtée'}</p>}
+      </div>
+
+      {/* Database sizes */}
+      {metrics.db && (metrics.db.databases?.length > 0) && (
+        <div className="card card-body">
+          <h4 className="text-sm font-semibold mb-3">Taille des bases</h4>
+          <table className="table">
+            <thead><tr><th>Base</th><th>Taille</th>{metrics.engine !== 'postgres' && <th>Tables</th>}</tr></thead>
+            <tbody>
+              {metrics.db.databases.map(db => (
+                <tr key={db.name}>
+                  <td className="font-mono">{db.name}</td>
+                  <td className="font-mono">{db.sizeHuman || formatBytes(db.size)}</td>
+                  {metrics.engine !== 'postgres' && <td className="font-mono">{db.tables}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Action history */}
+      <div className="card card-body">
+        <h4 className="text-sm font-semibold mb-3">Historique des actions</h4>
+        {metrics.history.totalActions > 0 ? (
+          <>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {Object.entries(metrics.history.summary).map(([action, info]) => (
+                <span key={action} className="badge badge-secondary">
+                  {action}: {info.count}×
+                </span>
+              ))}
+            </div>
+            <div style={{ maxHeight: 200, overflow: 'auto' }}>
+              <table className="table text-sm">
+                <thead><tr><th>Action</th><th>Date</th></tr></thead>
+                <tbody>
+                  {[...metrics.history.actions].reverse().slice(0, 20).map((a, i) => (
+                    <tr key={i}>
+                      <td><span className="badge badge-secondary">{a.action}</span></td>
+                      <td className="text-muted">{new Date(a.at).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : <p className="text-muted text-sm">Aucune action enregistrée</p>}
+      </div>
     </div>
   );
 }

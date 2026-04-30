@@ -395,6 +395,155 @@ function spawnScript(args) {
 const tasks = new Map();
 let taskIdCounter = 0;
 
+// ── Per-instance metrics ─────────────────────────────────────────────────────
+
+const instanceMetrics = new Map(); // name -> { actions: { up: [...], backup: [...], ... } }
+
+function recordAction(instanceName, action, details = {}) {
+    if (!instanceMetrics.has(instanceName)) {
+        instanceMetrics.set(instanceName, { actions: [] });
+    }
+    const m = instanceMetrics.get(instanceName);
+    m.actions.push({ action, at: Date.now(), ...details });
+    // Keep last 200 actions per instance
+    if (m.actions.length > 200) m.actions = m.actions.slice(-200);
+}
+
+function getInstanceMetricsSummary(instanceName) {
+    const m = instanceMetrics.get(instanceName);
+    if (!m) return { totalActions: 0, actions: [], summary: {} };
+    const summary = {};
+    for (const a of m.actions) {
+        if (!summary[a.action]) summary[a.action] = { count: 0, last: null };
+        summary[a.action].count++;
+        summary[a.action].last = a.at;
+    }
+    return { totalActions: m.actions.length, actions: m.actions.slice(-50), summary };
+}
+
+async function getContainerStats(instanceName, engine) {
+    const container = `dbserver_${instanceName}-${engine}-1`;
+    try {
+        const cmd = USE_WSL ? 'wsl' : 'docker';
+        const cmdArgs = USE_WSL
+            ? ['docker', 'stats', container, '--no-stream', '--format', '{{json .}}']
+            : ['stats', container, '--no-stream', '--format', '{{json .}}'];
+        const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 10000 });
+        const raw = JSON.parse(stdout.trim());
+        return {
+            cpu: raw.CPUPerc,
+            memory: raw.MemUsage,
+            memPercent: raw.MemPerc,
+            netIO: raw.NetIO,
+            blockIO: raw.BlockIO,
+            pids: raw.PIDs,
+        };
+    } catch { return null; }
+}
+
+async function getContainerDiskUsage(instanceName, engine) {
+    const container = `dbserver_${instanceName}-${engine}-1`;
+    try {
+        const cmd = USE_WSL ? 'wsl' : 'docker';
+        // Get volume size via exec
+        let duArgs;
+        if (engine === 'postgres') {
+            duArgs = USE_WSL
+                ? ['docker', 'exec', container, 'du', '-sh', '/var/lib/postgresql/data']
+                : ['exec', container, 'du', '-sh', '/var/lib/postgresql/data'];
+        } else {
+            duArgs = USE_WSL
+                ? ['docker', 'exec', container, 'du', '-sh', '/var/lib/mysql']
+                : ['exec', container, 'du', '-sh', '/var/lib/mysql'];
+        }
+        const { stdout } = await execFileAsync(cmd, duArgs, { timeout: 15000 });
+        const size = stdout.trim().split(/\s+/)[0];
+        return { dataDir: size };
+    } catch { return null; }
+}
+
+async function getDbEngineStats(instanceName, engine, config) {
+    const container = `dbserver_${instanceName}-${engine}-1`;
+    try {
+        const cmd = USE_WSL ? 'wsl' : 'docker';
+        let cmdArgs;
+        if (engine === 'postgres') {
+            const user = config.DB_USER || 'postgres';
+            const query = `
+                SELECT json_build_object(
+                    'connections', (SELECT json_build_object(
+                        'active', (SELECT count(*) FROM pg_stat_activity WHERE state = 'active'),
+                        'idle', (SELECT count(*) FROM pg_stat_activity WHERE state = 'idle'),
+                        'total', (SELECT count(*) FROM pg_stat_activity),
+                        'max', (SELECT setting::int FROM pg_settings WHERE name = 'max_connections')
+                    )),
+                    'databases', (SELECT json_agg(json_build_object(
+                        'name', datname,
+                        'size', pg_database_size(datname),
+                        'sizeHuman', pg_size_pretty(pg_database_size(datname)),
+                        'numbackends', numbackends,
+                        'xact_commit', xact_commit,
+                        'xact_rollback', xact_rollback,
+                        'blks_hit', blks_hit,
+                        'blks_read', blks_read,
+                        'tup_returned', tup_returned,
+                        'tup_fetched', tup_fetched,
+                        'tup_inserted', tup_inserted,
+                        'tup_updated', tup_updated,
+                        'tup_deleted', tup_deleted
+                    )) FROM pg_stat_database WHERE datname NOT IN ('template0','template1','postgres')),
+                    'uptime', (SELECT extract(epoch FROM now() - pg_postmaster_start_time()))
+                );`;
+            cmdArgs = USE_WSL
+                ? ['docker', 'exec', container, 'psql', '-U', user, '-t', '-A', '-c', query]
+                : ['exec', container, 'psql', '-U', user, '-t', '-A', '-c', query];
+        } else {
+            // MariaDB/MySQL
+            const pw = config.DB_ROOT_PASSWORD || 'root';
+            const client = engine === 'mariadb' ? 'mariadb' : 'mysql';
+            const query = `SELECT JSON_OBJECT(
+                'connections', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Threads_connected'),
+                'maxConnections', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES WHERE VARIABLE_NAME = 'max_connections'),
+                'totalQueries', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Questions'),
+                'slowQueries', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Slow_queries'),
+                'uptime', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Uptime'),
+                'bytesReceived', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Bytes_received'),
+                'bytesSent', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Bytes_sent'),
+                'abortedConnections', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Aborted_connects'),
+                'openTables', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Open_tables'),
+                'tableLocksWaited', (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Table_locks_waited')
+            ) AS stats;`;
+            cmdArgs = USE_WSL
+                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', query]
+                : ['exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', query];
+        }
+        const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 15000 });
+        const stats = JSON.parse(stdout.trim());
+
+        // Get table sizes for mysql/mariadb
+        if (engine !== 'postgres') {
+            const sizeQuery = `SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                'name', TABLE_SCHEMA,
+                'size', SUM(DATA_LENGTH + INDEX_LENGTH),
+                'sizeHuman', CONCAT(ROUND(SUM(DATA_LENGTH + INDEX_LENGTH) / 1048576, 1), ' MB'),
+                'tables', COUNT(*)
+            )) FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys')
+            GROUP BY TABLE_SCHEMA;`;
+            const sizeCmdArgs = USE_WSL
+                ? ['docker', 'exec', container, engine === 'mariadb' ? 'mariadb' : 'mysql', '-uroot', `-p${config.DB_ROOT_PASSWORD || 'root'}`, '-N', '-e', sizeQuery]
+                : ['exec', container, engine === 'mariadb' ? 'mariadb' : 'mysql', '-uroot', `-p${config.DB_ROOT_PASSWORD || 'root'}`, '-N', '-e', sizeQuery];
+            try {
+                const { stdout: sizeOut } = await execFileAsync(cmd, sizeCmdArgs, { timeout: 10000 });
+                stats.databases = JSON.parse(sizeOut.trim());
+            } catch { stats.databases = []; }
+        }
+
+        return stats;
+    } catch (err) { return { error: err.message }; }
+}
+
+
 function createTask(label, instance) {
     const id = String(++taskIdCounter);
     const task = { id, label, instance, status: 'running', startedAt: Date.now(), output: '', error: null };
@@ -842,6 +991,38 @@ async function handleRequest(req, res) {
         }
     }
 
+    // ── Instance metrics ───────────────────────────────────────────────────────
+
+    const metricsMatch = url.pathname.match(/^\/api\/instances\/([a-zA-Z0-9_-]+)\/metrics$/);
+    if (req.method === 'GET' && metricsMatch) {
+        const name = metricsMatch[1];
+        try {
+            const inst = await getInstance(name);
+            const engine = inst.config.DB_ENGINE || 'mariadb';
+            const result = { instance: name, engine };
+
+            // Action history
+            result.history = getInstanceMetricsSummary(name);
+
+            if (inst.running) {
+                // Container resource stats
+                result.container = await getContainerStats(name, engine);
+                // Disk usage
+                result.disk = await getContainerDiskUsage(name, engine);
+                // DB engine stats
+                result.db = await getDbEngineStats(name, engine, inst.config);
+            } else {
+                result.container = null;
+                result.disk = null;
+                result.db = null;
+            }
+
+            return sendJson(res, 200, result);
+        } catch (err) {
+            return sendJson(res, 500, { error: err.message });
+        }
+    }
+
     // ── Instance actions ─────────────────────────────────────────────────────
 
     // List databases (GET)
@@ -877,6 +1058,9 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && actionMatch) {
         const name = actionMatch[1];
         const action = actionMatch[2];
+
+        // Record action metric (except databases which is just a query)
+        if (action !== 'databases') recordAction(name, action);
 
         if (action === 'seed') {
             const body = await parseJsonBody(req);
