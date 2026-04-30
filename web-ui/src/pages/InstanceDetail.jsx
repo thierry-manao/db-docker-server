@@ -10,6 +10,7 @@ export default function InstanceDetail() {
   const { instances, seedFiles, refresh, toast } = useApp();
   const [tab, setTab] = useState(urlTab || 'overview');
   const [pending, setPending] = useState(null);
+  const [backupModal, setBackupModal] = useState(null); // null or { databases: [], selected: [] }
 
   const inst = instances.find((i) => i.name === name);
 
@@ -59,7 +60,18 @@ export default function InstanceDetail() {
               <Play size={12} /> Démarrer
             </button>
           )}
-          <button className="btn btn-outline btn-sm" disabled={!!pending || !inst.running} onClick={() => runAction('backup')}>
+          <button className="btn btn-outline btn-sm" disabled={!!pending || !inst.running} onClick={async () => {
+            try {
+              const { databases } = await api.listDatabases(name);
+              if (databases && databases.length > 1) {
+                setBackupModal({ databases, selected: [...databases] });
+              } else {
+                runAction('backup', databases?.length === 1 ? { databases } : undefined);
+              }
+            } catch {
+              runAction('backup');
+            }
+          }}>
             <Download size={12} /> Backup
           </button>
           <button className="btn btn-outline btn-sm" disabled={!!pending} onClick={() => {
@@ -76,6 +88,46 @@ export default function InstanceDetail() {
           {pending && <span className="spinner" />}
         </div>
       </div>
+
+      {/* Backup database selection modal */}
+      {backupModal && (
+        <div className="modal-overlay" onClick={() => setBackupModal(null)}>
+          <div className="card card-body" style={{ minWidth: 320, maxWidth: 420 }} onClick={e => e.stopPropagation()}>
+            <h4 className="text-sm font-semibold mb-3">Sélectionner les bases à sauvegarder</h4>
+            <div className="mb-3">
+              <label className="flex items-center gap-2 mb-2" style={{ cursor: 'pointer' }}>
+                <input type="checkbox"
+                  checked={backupModal.selected.length === backupModal.databases.length}
+                  onChange={(e) => setBackupModal(m => ({ ...m, selected: e.target.checked ? [...m.databases] : [] }))}
+                />
+                <span className="text-sm font-medium">Tout sélectionner</span>
+              </label>
+              {backupModal.databases.map(db => (
+                <label key={db} className="flex items-center gap-2 mb-1" style={{ cursor: 'pointer' }}>
+                  <input type="checkbox"
+                    checked={backupModal.selected.includes(db)}
+                    onChange={(e) => setBackupModal(m => ({
+                      ...m,
+                      selected: e.target.checked ? [...m.selected, db] : m.selected.filter(d => d !== db)
+                    }))}
+                  />
+                  <span className="font-mono text-sm">{db}</span>
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button className="btn btn-ghost btn-sm" onClick={() => setBackupModal(null)}>Annuler</button>
+              <button className="btn btn-primary btn-sm" disabled={backupModal.selected.length === 0} onClick={() => {
+                const selected = backupModal.selected;
+                setBackupModal(null);
+                runAction('backup', { databases: selected });
+              }}>
+                <Download size={12} /> Sauvegarder ({backupModal.selected.length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="tabs mb-4">
