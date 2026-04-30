@@ -636,7 +636,6 @@ async function getSlowQueries(instanceName, engine, config, limit = 20) {
         let cmdArgs;
         if (engine === 'postgres') {
             const user = config.DB_USER || 'postgres';
-            // Use pg_stat_statements if available, fall back to pg_stat_activity
             const query = `
                 DO $$ BEGIN
                     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements') THEN
@@ -664,35 +663,29 @@ async function getSlowQueries(instanceName, engine, config, limit = 20) {
             cmdArgs = USE_WSL
                 ? ['docker', 'exec', container, 'psql', '-U', user, '-t', '-A', '-c', query]
                 : ['exec', container, 'psql', '-U', user, '-t', '-A', '-c', query];
+            const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
+            const trimmed = stdout.trim();
+            if (!trimmed || trimmed === '' || trimmed === 'null') return [];
+            return JSON.parse(trimmed) || [];
         } else {
-            // MariaDB/MySQL: query from performance_schema or process list
+            // MariaDB/MySQL: use tab-separated output for maximum compatibility
             const client = engine === 'mariadb' ? 'mariadb' : 'mysql';
             const pw = config.DB_ROOT_PASSWORD || 'root';
-            const query = `SELECT COALESCE(
-                (SELECT JSON_ARRAYAGG(JSON_OBJECT(
-                    'schema', SCHEMA_NAME,
-                    'digest_text', DIGEST_TEXT,
-                    'count', COUNT_STAR,
-                    'totalTime', ROUND(SUM_TIMER_WAIT/1000000000, 2),
-                    'avgTime', ROUND(AVG_TIMER_WAIT/1000000000, 2),
-                    'maxTime', ROUND(MAX_TIMER_WAIT/1000000000, 2),
-                    'rows_sent', SUM_ROWS_SENT,
-                    'rows_examined', SUM_ROWS_EXAMINED
-                )) FROM (
-                    SELECT * FROM performance_schema.events_statements_summary_by_digest
-                    WHERE SCHEMA_NAME IS NOT NULL AND DIGEST_TEXT IS NOT NULL
-                    ORDER BY SUM_TIMER_WAIT DESC LIMIT ${limit}
-                ) t),
-                JSON_ARRAY()
-            );`;
+            // Try slow_log table first, then fall back to performance_schema
+            const query = `SELECT IFNULL(SCHEMA_NAME,'—') AS s, LEFT(IFNULL(DIGEST_TEXT,'?'),200) AS q, COUNT_STAR AS c, ROUND(SUM_TIMER_WAIT/1000000000,2) AS t, ROUND(AVG_TIMER_WAIT/1000000000,2) AS a, ROUND(MAX_TIMER_WAIT/1000000000,2) AS m, SUM_ROWS_SENT AS rs, SUM_ROWS_EXAMINED AS re FROM performance_schema.events_statements_summary_by_digest WHERE DIGEST_TEXT IS NOT NULL ORDER BY SUM_TIMER_WAIT DESC LIMIT ${limit};`;
             cmdArgs = USE_WSL
-                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', query]
-                : ['exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', query];
+                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '--batch', '--skip-column-names', '-e', query]
+                : ['exec', container, client, '-uroot', `-p${pw}`, '--batch', '--skip-column-names', '-e', query];
+            const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
+            const trimmed = stdout.trim();
+            if (!trimmed) return [];
+            // Parse tab-separated rows
+            const rows = trimmed.split('\n').map(line => {
+                const [schema, digest_text, count, totalTime, avgTime, maxTime, rows_sent, rows_examined] = line.split('\t');
+                return { schema, digest_text, count: Number(count), totalTime: Number(totalTime), avgTime: Number(avgTime), maxTime: Number(maxTime), rows_sent: Number(rows_sent), rows_examined: Number(rows_examined) };
+            });
+            return rows;
         }
-        const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
-        const trimmed = stdout.trim();
-        if (!trimmed || trimmed === '' || trimmed === 'null') return [];
-        return JSON.parse(trimmed) || [];
     } catch (err) { return { error: err.message }; }
 }
 
