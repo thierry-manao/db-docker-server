@@ -543,6 +543,159 @@ async function getDbEngineStats(instanceName, engine, config) {
     } catch (err) { return { error: err.message }; }
 }
 
+// ── Metrics history (periodic snapshots) ─────────────────────────────────────
+
+const metricsHistory = new Map(); // name -> { snapshots: [{ ts, cpu, mem, queries, connections }] }
+const METRICS_MAX_SNAPSHOTS = 60; // keep ~30 minutes at 30s intervals
+const METRICS_INTERVAL_MS = 30000;
+
+function getMetricsHistory(instanceName) {
+    if (!metricsHistory.has(instanceName)) metricsHistory.set(instanceName, { snapshots: [] });
+    return metricsHistory.get(instanceName);
+}
+
+async function collectMetricsSnapshot(instanceName, engine, config) {
+    const h = getMetricsHistory(instanceName);
+    const container = `dbserver_${instanceName}-${engine}-1`;
+    try {
+        const cmd = USE_WSL ? 'wsl' : 'docker';
+        // Get container stats
+        const statsArgs = USE_WSL
+            ? ['docker', 'stats', container, '--no-stream', '--format', '{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}']
+            : ['stats', container, '--no-stream', '--format', '{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}'];
+        const { stdout } = await execFileAsync(cmd, statsArgs, { timeout: 10000 });
+        const [cpuStr, memStr] = stdout.trim().split('|');
+        const cpu = parseFloat(cpuStr) || 0;
+        const mem = parseFloat(memStr) || 0;
+
+        // Get query count
+        let queries = 0, connections = 0;
+        if (engine === 'postgres') {
+            const user = config.DB_USER || 'postgres';
+            const qArgs = USE_WSL
+                ? ['docker', 'exec', container, 'psql', '-U', user, '-t', '-A', '-c', "SELECT sum(xact_commit + xact_rollback) FROM pg_stat_database;"]
+                : ['exec', container, 'psql', '-U', user, '-t', '-A', '-c', "SELECT sum(xact_commit + xact_rollback) FROM pg_stat_database;"];
+            const cArgs = USE_WSL
+                ? ['docker', 'exec', container, 'psql', '-U', user, '-t', '-A', '-c', "SELECT count(*) FROM pg_stat_activity;"]
+                : ['exec', container, 'psql', '-U', user, '-t', '-A', '-c', "SELECT count(*) FROM pg_stat_activity;"];
+            try {
+                const { stdout: qOut } = await execFileAsync(cmd, qArgs, { timeout: 5000 });
+                queries = parseInt(qOut.trim()) || 0;
+            } catch {}
+            try {
+                const { stdout: cOut } = await execFileAsync(cmd, cArgs, { timeout: 5000 });
+                connections = parseInt(cOut.trim()) || 0;
+            } catch {}
+        } else {
+            const client = engine === 'mariadb' ? 'mariadb' : 'mysql';
+            const pw = config.DB_ROOT_PASSWORD || 'root';
+            const qArgs = USE_WSL
+                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Questions';"]
+                : ['exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Questions';"];
+            const cArgs = USE_WSL
+                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Threads_connected';"]
+                : ['exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Threads_connected';"];
+            try {
+                const { stdout: qOut } = await execFileAsync(cmd, qArgs, { timeout: 5000 });
+                queries = parseInt(qOut.trim()) || 0;
+            } catch {}
+            try {
+                const { stdout: cOut } = await execFileAsync(cmd, cArgs, { timeout: 5000 });
+                connections = parseInt(cOut.trim()) || 0;
+            } catch {}
+        }
+
+        h.snapshots.push({ ts: Date.now(), cpu, mem, queries, connections });
+        if (h.snapshots.length > METRICS_MAX_SNAPSHOTS) h.snapshots.shift();
+    } catch { /* instance not running, skip */ }
+}
+
+// Periodic metrics collector
+let metricsCollectorInterval = null;
+
+async function startMetricsCollector() {
+    if (metricsCollectorInterval) return;
+    metricsCollectorInterval = setInterval(async () => {
+        try {
+            const instances = await listInstances();
+            for (const inst of instances) {
+                if (!inst.running) continue;
+                const engine = inst.config.DB_ENGINE || 'mariadb';
+                collectMetricsSnapshot(inst.name, engine, inst.config).catch(() => {});
+            }
+        } catch {}
+    }, METRICS_INTERVAL_MS);
+}
+
+// ── Slow queries ─────────────────────────────────────────────────────────────
+
+async function getSlowQueries(instanceName, engine, config, limit = 20) {
+    const container = `dbserver_${instanceName}-${engine}-1`;
+    const cmd = USE_WSL ? 'wsl' : 'docker';
+    try {
+        let cmdArgs;
+        if (engine === 'postgres') {
+            const user = config.DB_USER || 'postgres';
+            // Use pg_stat_statements if available, fall back to pg_stat_activity
+            const query = `
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements') THEN
+                        RAISE NOTICE 'has_pgss';
+                    END IF;
+                END $$;
+                SELECT COALESCE(
+                    (SELECT json_agg(q) FROM (
+                        SELECT query, calls, total_exec_time::numeric(12,2) as total_ms,
+                            mean_exec_time::numeric(12,2) as mean_ms,
+                            rows, shared_blks_hit, shared_blks_read
+                        FROM pg_stat_statements
+                        WHERE query NOT LIKE '%pg_stat%'
+                        ORDER BY total_exec_time DESC LIMIT ${limit}
+                    ) q),
+                    (SELECT json_agg(q) FROM (
+                        SELECT query, state, wait_event_type, wait_event,
+                            extract(epoch FROM now() - query_start)::numeric(10,2) as duration_s,
+                            datname, usename
+                        FROM pg_stat_activity
+                        WHERE state != 'idle' AND query NOT LIKE '%pg_stat%' AND pid != pg_backend_pid()
+                        ORDER BY query_start ASC LIMIT ${limit}
+                    ) q)
+                );`;
+            cmdArgs = USE_WSL
+                ? ['docker', 'exec', container, 'psql', '-U', user, '-t', '-A', '-c', query]
+                : ['exec', container, 'psql', '-U', user, '-t', '-A', '-c', query];
+        } else {
+            // MariaDB/MySQL: query from performance_schema or process list
+            const client = engine === 'mariadb' ? 'mariadb' : 'mysql';
+            const pw = config.DB_ROOT_PASSWORD || 'root';
+            const query = `SELECT COALESCE(
+                (SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                    'schema', SCHEMA_NAME,
+                    'digest_text', DIGEST_TEXT,
+                    'count', COUNT_STAR,
+                    'totalTime', ROUND(SUM_TIMER_WAIT/1000000000, 2),
+                    'avgTime', ROUND(AVG_TIMER_WAIT/1000000000, 2),
+                    'maxTime', ROUND(MAX_TIMER_WAIT/1000000000, 2),
+                    'rows_sent', SUM_ROWS_SENT,
+                    'rows_examined', SUM_ROWS_EXAMINED
+                )) FROM (
+                    SELECT * FROM performance_schema.events_statements_summary_by_digest
+                    WHERE SCHEMA_NAME IS NOT NULL AND DIGEST_TEXT IS NOT NULL
+                    ORDER BY SUM_TIMER_WAIT DESC LIMIT ${limit}
+                ) t),
+                JSON_ARRAY()
+            );`;
+            cmdArgs = USE_WSL
+                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', query]
+                : ['exec', container, client, '-uroot', `-p${pw}`, '-N', '-e', query];
+        }
+        const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
+        const trimmed = stdout.trim();
+        if (!trimmed || trimmed === '' || trimmed === 'null') return [];
+        return JSON.parse(trimmed) || [];
+    } catch (err) { return { error: err.message }; }
+}
+
 
 function createTask(label, instance) {
     const id = String(++taskIdCounter);
@@ -1004,6 +1157,10 @@ async function handleRequest(req, res) {
             // Action history
             result.history = getInstanceMetricsSummary(name);
 
+            // Metrics time series (snapshots)
+            const mh = getMetricsHistory(name);
+            result.timeSeries = mh.snapshots;
+
             if (inst.running) {
                 // Container resource stats
                 result.container = await getContainerStats(name, engine);
@@ -1018,6 +1175,21 @@ async function handleRequest(req, res) {
             }
 
             return sendJson(res, 200, result);
+        } catch (err) {
+            return sendJson(res, 500, { error: err.message });
+        }
+    }
+
+    // Slow queries endpoint
+    const slowMatch = url.pathname.match(/^\/api\/instances\/([a-zA-Z0-9_-]+)\/slow-queries$/);
+    if (req.method === 'GET' && slowMatch) {
+        const name = slowMatch[1];
+        try {
+            const inst = await getInstance(name);
+            if (!inst.running) return sendJson(res, 200, { queries: [] });
+            const engine = inst.config.DB_ENGINE || 'mariadb';
+            const queries = await getSlowQueries(name, engine, inst.config);
+            return sendJson(res, 200, { queries });
         } catch (err) {
             return sendJson(res, 500, { error: err.message });
         }
@@ -1597,5 +1769,7 @@ server.listen(PORT, async () => {
         console.error('[dbserver-ui] WARN: PostgreSQL init failed:', err.message);
         console.error('[dbserver-ui] Auth will not work until database is available.');
     }
+    startMetricsCollector();
+    console.log('[dbserver-ui] Metrics collector started (30s interval)');
     console.log(`dbserver UI running at http://localhost:${PORT}`);
 });
