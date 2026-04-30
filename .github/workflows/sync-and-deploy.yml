@@ -55,9 +55,9 @@ jobs:
           script: |
             set -euo pipefail
             cd ${{ vars.INSTALL_PATH }}
-            echo "[deploy] Pulling latest from ${{ env.DEPLOY_BRANCH }}..."
-            git fetch origin ${{ env.DEPLOY_BRANCH }}
-            git reset --hard origin/${{ env.DEPLOY_BRANCH }}
+            echo "[deploy] Pulling latest from main..."
+            git fetch origin main
+            git reset --hard origin/main
             echo "[deploy] Running setup update..."
             bash setup.sh update
             echo "[deploy] ✅ Done!"

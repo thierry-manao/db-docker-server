@@ -1234,6 +1234,34 @@ async function handleRequest(req, res) {
         }
     }
 
+    // ── Deploy webhook (authenticates with superadmin credentials) ──────────
+
+    if (req.method === 'POST' && url.pathname === '/api/webhook/deploy') {
+        const body = await parseJsonBody(req).catch(() => ({}));
+        const username = normalizeValue(body.username);
+        const password = normalizeValue(body.password);
+        if (!username || !password) return sendJson(res, 401, { error: 'Missing username or password' });
+        try {
+            const user = await findUserByUsername(username);
+            if (!user || !verifyPassword(password, user.password)) {
+                return sendJson(res, 403, { error: 'Invalid credentials' });
+            }
+            if (user.role !== 'superadmin') return sendJson(res, 403, { error: 'Superadmin access required' });
+        } catch (err) { return sendJson(res, 500, { error: 'Auth error: ' + err.message }); }
+
+        const branch = body.branch || 'main';
+        const installPath = path.resolve(__dirname, '..');
+
+        // Run deploy in background
+        const { exec } = require('child_process');
+        const script = `cd "${installPath}" && git fetch origin ${branch} && git reset --hard origin/${branch} && bash setup.sh update`;
+        exec(script, { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+            if (err) console.error('[webhook] Deploy failed:', err.message, stderr);
+            else console.log('[webhook] Deploy success:', stdout.slice(-200));
+        });
+        return sendJson(res, 200, { status: 'deploy started', branch });
+    }
+
     // ── Instance actions ─────────────────────────────────────────────────────
 
     // List databases (GET)

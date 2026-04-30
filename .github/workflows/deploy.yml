@@ -16,19 +16,17 @@ jobs:
       matrix:
         server: ${{ fromJson(vars.DEPLOY_SERVERS) }}
     steps:
-      - name: Deploy to ${{ matrix.server }}
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ matrix.server }}
-          username: ${{ secrets.SSH_USER }}
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: ${{ vars.SSH_PORT || 22 }}
-          script: |
-            set -euo pipefail
-            cd ${{ vars.INSTALL_PATH }}
-            echo "[deploy] Pulling latest from ${{ env.DEPLOY_BRANCH }}..."
-            git fetch origin ${{ env.DEPLOY_BRANCH }}
-            git reset --hard origin/${{ env.DEPLOY_BRANCH }}
-            echo "[deploy] Running setup update..."
-            bash setup.sh update
-            echo "[deploy] ✅ Done!"
+      - name: Trigger deploy on ${{ matrix.server }}
+        run: |
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"username":"${{ secrets.DBSERVER_USER }}","password":"${{ secrets.DBSERVER_PASSWORD }}","branch":"${{ env.DEPLOY_BRANCH }}"}' \
+            "https://${{ matrix.server }}:${{ vars.UI_PORT || 8888 }}/api/webhook/deploy" \
+            --max-time 120)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Deploy triggered on ${{ matrix.server }}"
+          else
+            echo "❌ Failed on ${{ matrix.server }} (HTTP $RESPONSE)"
+            exit 1
+          fi
