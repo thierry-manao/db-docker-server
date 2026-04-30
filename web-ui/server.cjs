@@ -678,23 +678,59 @@ async function getSlowQueries(instanceName, engine, config, limit = 20) {
             if (!trimmed || trimmed === '' || trimmed === 'null') return [];
             return JSON.parse(trimmed) || [];
         } else {
-            // MariaDB/MySQL: use tab-separated output for maximum compatibility
+            // MariaDB/MySQL: try 3 sources in order:
+            // 1. performance_schema (best — query digests with stats)
+            // 2. mysql.slow_log table (if log_output=TABLE)
+            // 3. SHOW PROCESSLIST (currently running)
             const client = engine === 'mariadb' ? 'mariadb' : 'mysql';
             const pw = config.DB_ROOT_PASSWORD || 'root';
-            // Try slow_log table first, then fall back to performance_schema
-            const query = `SELECT IFNULL(SCHEMA_NAME,'—') AS s, LEFT(IFNULL(DIGEST_TEXT,'?'),200) AS q, COUNT_STAR AS c, ROUND(SUM_TIMER_WAIT/1000000000,2) AS t, ROUND(AVG_TIMER_WAIT/1000000000,2) AS a, ROUND(MAX_TIMER_WAIT/1000000000,2) AS m, SUM_ROWS_SENT AS rs, SUM_ROWS_EXAMINED AS re FROM performance_schema.events_statements_summary_by_digest WHERE DIGEST_TEXT IS NOT NULL ORDER BY SUM_TIMER_WAIT DESC LIMIT ${limit};`;
-            cmdArgs = USE_WSL
-                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '--batch', '--skip-column-names', '-e', query]
-                : ['exec', container, client, '-uroot', `-p${pw}`, '--batch', '--skip-column-names', '-e', query];
-            const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
-            const trimmed = stdout.trim();
-            if (!trimmed) return [];
-            // Parse tab-separated rows
-            const rows = trimmed.split('\n').map(line => {
-                const [schema, digest_text, count, totalTime, avgTime, maxTime, rows_sent, rows_examined] = line.split('\t');
-                return { schema, digest_text, count: Number(count), totalTime: Number(totalTime), avgTime: Number(avgTime), maxTime: Number(maxTime), rows_sent: Number(rows_sent), rows_examined: Number(rows_examined) };
-            });
-            return rows;
+            const baseArgs = USE_WSL
+                ? ['docker', 'exec', container, client, '-uroot', `-p${pw}`, '--batch', '--skip-column-names', '-e']
+                : ['exec', container, client, '-uroot', `-p${pw}`, '--batch', '--skip-column-names', '-e'];
+
+            // Source 1: performance_schema digests
+            try {
+                const q1 = `SELECT IFNULL(SCHEMA_NAME,'—'), LEFT(IFNULL(DIGEST_TEXT,'?'),200), COUNT_STAR, ROUND(SUM_TIMER_WAIT/1000000000,2), ROUND(AVG_TIMER_WAIT/1000000000,2), ROUND(MAX_TIMER_WAIT/1000000000,2), SUM_ROWS_SENT, SUM_ROWS_EXAMINED FROM performance_schema.events_statements_summary_by_digest ORDER BY SUM_TIMER_WAIT DESC LIMIT ${limit};`;
+                const { stdout: out1 } = await execFileAsync(cmd, [...baseArgs, q1], { timeout: 10000, maxBuffer: 10 * 1024 * 1024 });
+                const trimmed1 = out1.trim();
+                if (trimmed1) {
+                    const rows = trimmed1.split('\n').map(line => {
+                        const [schema, digest_text, count, totalTime, avgTime, maxTime, rows_sent, rows_examined] = line.split('\t');
+                        return { source: 'performance_schema', schema, digest_text, count: Number(count), totalTime: Number(totalTime), avgTime: Number(avgTime), maxTime: Number(maxTime), rows_sent: Number(rows_sent), rows_examined: Number(rows_examined) };
+                    });
+                    if (rows.length > 0) return rows;
+                }
+            } catch {}
+
+            // Source 2: mysql.slow_log table
+            try {
+                const q2 = `SELECT db, LEFT(sql_text,200), query_time, lock_time, rows_sent, rows_examined FROM mysql.slow_log ORDER BY start_time DESC LIMIT ${limit};`;
+                const { stdout: out2 } = await execFileAsync(cmd, [...baseArgs, q2], { timeout: 10000, maxBuffer: 10 * 1024 * 1024 });
+                const trimmed2 = out2.trim();
+                if (trimmed2) {
+                    const rows = trimmed2.split('\n').map(line => {
+                        const [schema, digest_text, queryTime, lockTime, rows_sent, rows_examined] = line.split('\t');
+                        return { source: 'slow_log', schema, digest_text, count: 1, totalTime: queryTime, avgTime: queryTime, maxTime: lockTime, rows_sent: Number(rows_sent), rows_examined: Number(rows_examined) };
+                    });
+                    if (rows.length > 0) return rows;
+                }
+            } catch {}
+
+            // Source 3: SHOW FULL PROCESSLIST (current running queries)
+            try {
+                const q3 = `SELECT db, LEFT(info,200), time, state FROM information_schema.processlist WHERE command != 'Sleep' AND info IS NOT NULL AND info NOT LIKE '%processlist%' ORDER BY time DESC LIMIT ${limit};`;
+                const { stdout: out3 } = await execFileAsync(cmd, [...baseArgs, q3], { timeout: 10000, maxBuffer: 10 * 1024 * 1024 });
+                const trimmed3 = out3.trim();
+                if (trimmed3) {
+                    const rows = trimmed3.split('\n').map(line => {
+                        const [schema, digest_text, time, state] = line.split('\t');
+                        return { source: 'processlist', schema, digest_text: `[${state}] ${digest_text}`, count: 1, totalTime: Number(time), avgTime: Number(time), maxTime: 0, rows_sent: 0, rows_examined: 0 };
+                    });
+                    if (rows.length > 0) return rows;
+                }
+            } catch {}
+
+            return [];
         }
     } catch (err) { return { error: err.message }; }
 }
