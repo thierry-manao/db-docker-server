@@ -844,8 +844,40 @@ async function handleRequest(req, res) {
             const body = await parseJsonBody(req);
             const args = [name, 'backup'];
             if (body.db) args.push(body.db);
-            const task = createTask(`Backup ${name}${body.db ? '/' + body.db : ''}`, name);
-            runTaskScript(task, args);
+            const task = createTask(`Backup ${name}${body.db ? '/' + body.db : ''} → MinIO`, name);
+            // Run backup then sync to MinIO
+            execFileAsync(
+                USE_WSL ? 'wsl' : 'bash',
+                USE_WSL ? ['bash', toWslPath(SCRIPT_PATH), ...args] : [SCRIPT_PATH, ...args],
+                { cwd: PROJECT_DIR, timeout: 300000 }
+            ).then(async ({ stdout }) => {
+                task.output = stdout.trim();
+                // Extract backup filename from output (e.g. "Backup saved: /path/to/file.sql (1.2M)")
+                const match = stdout.match(/Backup saved:\s*(.+\.sql)/);
+                if (match) {
+                    const backupPath = match[1].trim();
+                    const backupName = path.basename(backupPath);
+                    try {
+                        const client = await getMinioClient();
+                        if (client) {
+                            const bucket = await ensureMinioBucket(client);
+                            const localFile = path.join(BACKUPS_DIR, backupName);
+                            await client.fPutObject(bucket, `backups/${backupName}`, localFile, { 'Content-Type': 'application/sql' });
+                            task.output += `\nUploaded to MinIO: backups/${backupName}`;
+                        } else {
+                            task.output += '\nMinIO not configured, skipping sync.';
+                        }
+                    } catch (err) {
+                        task.output += `\nMinIO upload failed: ${err.message}`;
+                    }
+                }
+                task.status = 'done';
+                task.finishedAt = Date.now();
+            }).catch((err) => {
+                task.status = 'error';
+                task.error = err.stderr || err.message;
+                task.finishedAt = Date.now();
+            });
             return sendJson(res, 202, { message: 'Backup started', taskId: task.id });
         }
 
