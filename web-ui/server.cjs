@@ -935,9 +935,11 @@ async function handleRequest(req, res) {
                 USE_WSL ? ['bash', toWslPath(SCRIPT_PATH), ...args] : [SCRIPT_PATH, ...args],
                 { cwd: PROJECT_DIR, timeout: 300000 }
             ).then(async ({ stdout }) => {
-                task.output = stdout.trim();
+                // Strip ANSI color codes from script output
+                const cleanOutput = stdout.replace(/\x1b\[[0-9;]*m/g, '');
+                task.output = cleanOutput.trim();
                 // Extract backup folder from output (e.g. "Backup folder: /path/to/backup_name_timestamp")
-                const folderMatch = stdout.match(/Backup folder:\s*(.+)/);
+                const folderMatch = cleanOutput.match(/Backup folder:\s*(.+)/);
                 if (folderMatch) {
                     const backupFolder = folderMatch[1].trim();
                     const folderName = path.basename(backupFolder);
