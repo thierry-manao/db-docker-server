@@ -551,8 +551,8 @@ function MetricsTab({ name, inst }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [sqLoading, setSqLoading] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [range, setRange] = useState('all'); // 'all', '5m', '10m', '15m'
+  const [refreshInterval, setRefreshInterval] = useState(30); // seconds, 0 = off
+  const [range, setRange] = useState('all'); // 'all', '5m', '10m', '15m', '30m', '1h', '2h', '6h', '12h', '1d'
   const [visibleSeries, setVisibleSeries] = useState({ cpu: true, mem: true, queries: true, connections: true });
   const refreshRef = useRef(null);
 
@@ -580,13 +580,13 @@ function MetricsTab({ name, inst }) {
     loadSlowQueries();
   }, [name]);
 
-  // Auto-refresh every 30s
+  // Auto-refresh with configurable interval
   useEffect(() => {
-    if (autoRefresh) {
-      refreshRef.current = setInterval(() => { loadMetrics(); }, 30000);
+    if (refreshInterval > 0) {
+      refreshRef.current = setInterval(() => { loadMetrics(); }, refreshInterval * 1000);
     }
     return () => { if (refreshRef.current) clearInterval(refreshRef.current); };
-  }, [autoRefresh, name]);
+  }, [refreshInterval, name]);
 
   if (loading) return <div className="card card-body text-center"><span className="spinner" /> Chargement des métriques...</div>;
   if (error) return <div className="card card-body text-danger">{error}</div>;
@@ -610,13 +610,21 @@ function MetricsTab({ name, inst }) {
   };
 
   // Filter time series by range
-  const rangeMs = { 'all': Infinity, '5m': 5 * 60000, '10m': 10 * 60000, '15m': 15 * 60000 };
+  const rangeMs = { 'all': Infinity, '5m': 5 * 60000, '10m': 10 * 60000, '15m': 15 * 60000, '30m': 30 * 60000, '1h': 3600000, '2h': 7200000, '6h': 21600000, '12h': 43200000, '1d': 86400000 };
   const now = Date.now();
   const cutoff = now - (rangeMs[range] || Infinity);
   const filteredSeries = (metrics.timeSeries || []).filter(p => p.ts >= cutoff);
 
+  // Adapt time format based on range
+  const getTimeFormat = () => {
+    const ms = rangeMs[range] || Infinity;
+    if (ms <= 15 * 60000) return { hour: '2-digit', minute: '2-digit', second: '2-digit' };
+    if (ms <= 3600000) return { hour: '2-digit', minute: '2-digit' };
+    return { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' };
+  };
+
   const chartData = filteredSeries.map(p => ({
-    time: new Date(p.ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    time: new Date(p.ts).toLocaleTimeString('fr-FR', getTimeFormat()),
     cpu: p.cpu,
     mem: p.mem,
     queries: p.queries,
@@ -654,12 +662,25 @@ function MetricsTab({ name, inst }) {
               <option value="5m">5 min</option>
               <option value="10m">10 min</option>
               <option value="15m">15 min</option>
+              <option value="30m">30 min</option>
+              <option value="1h">1 heure</option>
+              <option value="2h">2 heures</option>
+              <option value="6h">6 heures</option>
+              <option value="12h">12 heures</option>
+              <option value="1d">1 jour</option>
             </select>
-            {/* Auto-refresh toggle */}
-            <label className="flex items-center gap-1 text-xs text-muted" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} />
-              Auto 30s
-            </label>
+            {/* Refresh interval selector */}
+            <select className="input input-sm" style={{ width: 'auto', padding: '2px 8px' }}
+              value={refreshInterval} onChange={e => setRefreshInterval(Number(e.target.value))}>
+              <option value="0">Auto: off</option>
+              <option value="10">⟳ 10s</option>
+              <option value="15">⟳ 15s</option>
+              <option value="30">⟳ 30s</option>
+              <option value="45">⟳ 45s</option>
+              <option value="60">⟳ 1m</option>
+              <option value="90">⟳ 1m30</option>
+              <option value="120">⟳ 2m</option>
+            </select>
             {/* Manual refresh */}
             <button className="btn btn-ghost btn-sm" onClick={() => { loadMetrics(); loadSlowQueries(); }}>↻</button>
           </div>
@@ -709,7 +730,10 @@ function MetricsTab({ name, inst }) {
           </p>
         )}
         {chartData.length > 0 && (
-          <p className="text-xs text-muted mt-2 text-center">{chartData.length} point(s) affichés — collecte toutes les 30s</p>
+          <p className="text-xs text-muted mt-2 text-center">
+            {chartData.length} point(s) affichés — collecte toutes les 30s
+            {refreshInterval > 0 ? ` — rafraîchissement: ${refreshInterval}s` : ' — rafraîchissement: off'}
+          </p>
         )}
       </div>
 
