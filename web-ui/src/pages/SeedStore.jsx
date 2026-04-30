@@ -242,7 +242,7 @@ export default function SeedStore() {
             <div className="flex gap-4 text-xs text-muted">
               <span><strong>Utilisateur:</strong> {minioService.rootUser}</span>
               <span><strong>API Port:</strong> {minioService.apiPort}</span>
-              <span><strong>Console:</strong> <a href={`http://${window.location.hostname}:${minioService.consolePort}`} target="_blank" rel="noreferrer">${window.location.hostname}:{minioService.consolePort}</a></span>
+              <span><strong>Console:</strong> <a href={`http://${window.location.hostname}:${minioService.consolePort}`} target="_blank" rel="noreferrer">{window.location.hostname}:{minioService.consolePort}</a></span>
             </div>
           )}
 
