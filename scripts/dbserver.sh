@@ -620,44 +620,63 @@ cmd_backup() {
     require_instance "$name"
     load_instance_env "$name"
 
-    local db_target="${1:-${DB_DATABASE:-}}"
     local container
     container="$(get_db_container "$name")"
 
-    mkdir -p "$BACKUPS_DIR"
     local timestamp
     timestamp="$(date +%Y%m%d_%H%M%S)"
-    local backup_file="$BACKUPS_DIR/${name}_${db_target:-all}_${timestamp}.sql"
+    local backup_dir="$BACKUPS_DIR/backup_${name}_${timestamp}"
+    mkdir -p "$backup_dir"
 
-    bold "Backing up instance '$name'${db_target:+ database '$db_target'}..."
+    # Collect target databases: comma-separated arg, single arg, or all
+    local db_input="${1:-${DB_DATABASE:-}}"
+    local -a db_list=()
+
+    if [[ -n "$db_input" ]]; then
+        IFS=',' read -ra db_list <<< "$db_input"
+    fi
 
     local dump_opts="--single-transaction --skip-lock-tables"
 
-    case "$DB_ENGINE" in
-        mariadb)
-            if [[ -n "$db_target" ]]; then
-                docker exec "$container" mariadb-dump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts "$db_target" > "$backup_file"
-            else
+    if [[ ${#db_list[@]} -eq 0 ]]; then
+        # Backup all databases
+        local backup_file="$backup_dir/${name}_all.sql"
+        bold "Backing up instance '$name' (all databases)..."
+        case "$DB_ENGINE" in
+            mariadb)
                 docker exec "$container" mariadb-dump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts --all-databases > "$backup_file"
-            fi
-            ;;
-        mysql)
-            if [[ -n "$db_target" ]]; then
-                docker exec "$container" mysqldump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts "$db_target" > "$backup_file"
-            else
+                ;;
+            mysql)
                 docker exec "$container" mysqldump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts --all-databases > "$backup_file"
-            fi
-            ;;
-        postgres)
-            if [[ -n "$db_target" ]]; then
-                docker exec "$container" pg_dump -U "${DB_USER:-postgres}" "$db_target" > "$backup_file"
-            else
+                ;;
+            postgres)
                 docker exec "$container" pg_dumpall -U "${DB_USER:-postgres}" > "$backup_file"
-            fi
-            ;;
-    esac
+                ;;
+        esac
+        green "Backup saved: $backup_file ($(du -h "$backup_file" | cut -f1))"
+    else
+        # Backup each specified database individually
+        for db_target in "${db_list[@]}"; do
+            db_target="$(echo "$db_target" | xargs)"  # trim whitespace
+            [[ -z "$db_target" ]] && continue
+            local backup_file="$backup_dir/${name}_${db_target}.sql"
+            bold "Backing up instance '$name' database '$db_target'..."
+            case "$DB_ENGINE" in
+                mariadb)
+                    docker exec "$container" mariadb-dump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts "$db_target" > "$backup_file"
+                    ;;
+                mysql)
+                    docker exec "$container" mysqldump -uroot -p"${DB_ROOT_PASSWORD}" $dump_opts "$db_target" > "$backup_file"
+                    ;;
+                postgres)
+                    docker exec "$container" pg_dump -U "${DB_USER:-postgres}" "$db_target" > "$backup_file"
+                    ;;
+            esac
+            green "Backup saved: $backup_file ($(du -h "$backup_file" | cut -f1))"
+        done
+    fi
 
-    green "Backup saved: $backup_file ($(du -h "$backup_file" | cut -f1))"
+    green "Backup folder: $backup_dir"
 }
 
 # ── Clone ────────────────────────────────────────────────────────────────────

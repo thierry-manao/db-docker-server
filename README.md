@@ -82,7 +82,7 @@ dbserver ui <action> [options]
 | `destroy` | Remove instance and its volumes              |
 | `status`  | Show instance status                         |
 | `seed`    | Import a SQL file into the running DB        |
-| `backup`  | Dump the database to a timestamped SQL file  |
+| `backup`  | Dump database(s) to a timestamped folder     |
 | `clone`   | Clone an instance (config + data)            |
 | `exec`    | Run arbitrary SQL on the instance            |
 | `creds`   | Manage DB users (list/create/drop/passwd)    |
@@ -112,8 +112,11 @@ dbserver gescom seed gescom.sql
 # Seed into a specific database
 dbserver gescom seed dump.sql --db other_db
 
-# Backup
+# Backup all databases
 dbserver gescom backup
+
+# Backup specific databases (comma-separated)
+dbserver gescom backup gtpdb500001,licencesdb
 
 # Manage credentials
 dbserver gescom creds create devuser pass123 --db gescom --privileges "SELECT,INSERT,UPDATE"
@@ -202,7 +205,7 @@ MinIO provides S3-compatible object storage for sharing seed files and backups a
 
 Configure MinIO connection in the Web UI settings or via the API.
 
-When MinIO is configured, backups are automatically uploaded to the `backups/` prefix in the configured bucket after each successful dump.
+When MinIO is configured, backups are automatically uploaded after each successful dump. Each backup run creates a timestamped folder (e.g. `backups/backup_licences_20250430_150000/`) containing individual `.sql` files per database.
 
 ## Development
 

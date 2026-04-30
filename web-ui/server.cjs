@@ -521,13 +521,33 @@ async function listBackups() {
     try {
         await fs.mkdir(BACKUPS_DIR, { recursive: true });
         const entries = await fs.readdir(BACKUPS_DIR, { withFileTypes: true });
-        const files = [];
+        const backups = [];
         for (const e of entries) {
-            if (!e.isFile() || !e.name.endsWith('.sql')) continue;
-            const stat = await fs.stat(path.join(BACKUPS_DIR, e.name));
-            files.push({ name: e.name, size: stat.size, date: stat.mtime.toISOString() });
+            if (e.isDirectory() && e.name.startsWith('backup_')) {
+                // New folder-based backups
+                const folderPath = path.join(BACKUPS_DIR, e.name);
+                const folderStat = await fs.stat(folderPath);
+                const files = await fs.readdir(folderPath);
+                const sqlFiles = files.filter(f => f.endsWith('.sql'));
+                let totalSize = 0;
+                for (const f of sqlFiles) {
+                    const s = await fs.stat(path.join(folderPath, f));
+                    totalSize += s.size;
+                }
+                backups.push({
+                    name: e.name,
+                    type: 'folder',
+                    files: sqlFiles,
+                    size: totalSize,
+                    date: folderStat.mtime.toISOString(),
+                });
+            } else if (e.isFile() && e.name.endsWith('.sql')) {
+                // Legacy flat file backups
+                const stat = await fs.stat(path.join(BACKUPS_DIR, e.name));
+                backups.push({ name: e.name, type: 'file', size: stat.size, date: stat.mtime.toISOString() });
+            }
         }
-        return files.sort((a, b) => b.date.localeCompare(a.date));
+        return backups.sort((a, b) => b.date.localeCompare(a.date));
     } catch { return []; }
 }
 
@@ -840,11 +860,46 @@ async function handleRequest(req, res) {
             return sendJson(res, 202, { message: 'Seeding started', taskId: task.id });
         }
 
+        if (action === 'databases') {
+            // List databases available in this instance
+            const inst = await getInstance(name);
+            const engine = inst.config.DB_ENGINE || 'mariadb';
+            const container = `dbserver_${name}-${engine}-1`;
+            try {
+                let cmd, cmdArgs;
+                if (engine === 'postgres') {
+                    cmd = USE_WSL ? 'wsl' : 'docker';
+                    cmdArgs = USE_WSL
+                        ? ['docker', 'exec', container, 'psql', '-U', inst.config.DB_USER || 'postgres', '-t', '-A', '-c', "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres' ORDER BY datname;"]
+                        : ['exec', container, 'psql', '-U', inst.config.DB_USER || 'postgres', '-t', '-A', '-c', "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres' ORDER BY datname;"];
+                } else {
+                    cmd = USE_WSL ? 'wsl' : 'docker';
+                    cmdArgs = USE_WSL
+                        ? ['docker', 'exec', container, engine === 'mariadb' ? 'mariadb' : 'mysql', '-uroot', `-p${inst.config.DB_ROOT_PASSWORD}`, '-N', '-e', "SHOW DATABASES;"]
+                        : ['exec', container, engine === 'mariadb' ? 'mariadb' : 'mysql', '-uroot', `-p${inst.config.DB_ROOT_PASSWORD}`, '-N', '-e', "SHOW DATABASES;"];
+                }
+                const { stdout } = await execFileAsync(cmd, cmdArgs, { timeout: 10000 });
+                const systemDbs = ['information_schema', 'performance_schema', 'mysql', 'sys'];
+                const databases = stdout.trim().split('\n').map(d => d.trim()).filter(d => d && !systemDbs.includes(d));
+                return sendJson(res, 200, { databases });
+            } catch (err) {
+                return sendJson(res, 500, { error: 'Could not list databases', details: err.message });
+            }
+        }
+
         if (action === 'backup') {
             const body = await parseJsonBody(req);
             const args = [name, 'backup'];
-            if (body.db) args.push(body.db);
-            const task = createTask(`Backup ${name}${body.db ? '/' + body.db : ''} → MinIO`, name);
+            // Support multiple databases: body.databases (array) or body.db (string)
+            let dbLabel = '';
+            if (body.databases && Array.isArray(body.databases) && body.databases.length > 0) {
+                args.push(body.databases.join(','));
+                dbLabel = body.databases.join(',');
+            } else if (body.db) {
+                args.push(body.db);
+                dbLabel = body.db;
+            }
+            const task = createTask(`Backup ${name}${dbLabel ? '/' + dbLabel : ''} → MinIO`, name);
             // Run backup then sync to MinIO
             execFileAsync(
                 USE_WSL ? 'wsl' : 'bash',
@@ -852,18 +907,24 @@ async function handleRequest(req, res) {
                 { cwd: PROJECT_DIR, timeout: 300000 }
             ).then(async ({ stdout }) => {
                 task.output = stdout.trim();
-                // Extract backup filename from output (e.g. "Backup saved: /path/to/file.sql (1.2M)")
-                const match = stdout.match(/Backup saved:\s*(.+\.sql)/);
-                if (match) {
-                    const backupPath = match[1].trim();
-                    const backupName = path.basename(backupPath);
+                // Extract backup folder from output (e.g. "Backup folder: /path/to/backup_name_timestamp")
+                const folderMatch = stdout.match(/Backup folder:\s*(.+)/);
+                if (folderMatch) {
+                    const backupFolder = folderMatch[1].trim();
+                    const folderName = path.basename(backupFolder);
                     try {
                         const client = await getMinioClient();
                         if (client) {
                             const bucket = await ensureMinioBucket(client);
-                            const localFile = path.join(BACKUPS_DIR, backupName);
-                            await client.fPutObject(bucket, `backups/${backupName}`, localFile, { 'Content-Type': 'application/sql' });
-                            task.output += `\nUploaded to MinIO: backups/${backupName}`;
+                            // Upload all .sql files from the backup folder
+                            const localFolder = path.join(BACKUPS_DIR, folderName);
+                            const files = await fs.readdir(localFolder);
+                            for (const file of files) {
+                                if (!file.endsWith('.sql')) continue;
+                                const filePath = path.join(localFolder, file);
+                                await client.fPutObject(bucket, `backups/${folderName}/${file}`, filePath, { 'Content-Type': 'application/sql' });
+                            }
+                            task.output += `\nUploaded to MinIO: backups/${folderName}/ (${files.filter(f => f.endsWith('.sql')).length} files)`;
                         } else {
                             task.output += '\nMinIO not configured, skipping sync.';
                         }
@@ -896,9 +957,21 @@ async function handleRequest(req, res) {
             const args = [name, 'exec', body.sql];
             if (body.db) args.push('--db', body.db);
             try {
-                const { stdout } = await runScript(args, { timeout: 30000 });
+                const cmd = USE_WSL ? 'wsl' : 'bash';
+                const scriptPath = USE_WSL ? toWslPath(SCRIPT_PATH) : SCRIPT_PATH;
+                const cmdArgs = USE_WSL ? ['bash', scriptPath, ...args] : [scriptPath, ...args];
+                const { stdout } = await execFileAsync(cmd, cmdArgs, {
+                    cwd: PROJECT_DIR,
+                    timeout: 30000,
+                    maxBuffer: 50 * 1024 * 1024, // 50 MB
+                });
                 return sendJson(res, 200, { result: stdout.trim() });
-            } catch (err) { return sendJson(res, 500, { error: err.stderr || err.message }); }
+            } catch (err) {
+                if (err.message && err.message.includes('maxBuffer')) {
+                    return sendJson(res, 413, { error: 'Query result too large. Add a LIMIT clause to reduce output.' });
+                }
+                return sendJson(res, 500, { error: err.stderr || err.message });
+            }
         }
 
         const destroyFlag = action === 'destroy' ? ['--yes'] : [];
