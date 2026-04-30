@@ -1,0 +1,63 @@
+name: Sync fork & deploy to servers
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily sync at 6:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+env:
+  DEPLOY_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.sync.outputs.updated }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Sync from upstream
+        id: sync
+        run: |
+          git remote add upstream ${{ vars.UPSTREAM_REPO }} || true
+          git fetch upstream ${{ env.DEPLOY_BRANCH }}
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/${{ env.DEPLOY_BRANCH }})
+          if [ "$LOCAL" != "$UPSTREAM" ]; then
+            git merge upstream/${{ env.DEPLOY_BRANCH }} --no-edit
+            git push origin ${{ env.DEPLOY_BRANCH }}
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Fork updated: $LOCAL → $UPSTREAM"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ Already up to date"
+          fi
+
+  deploy:
+    needs: sync
+    if: needs.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        server: ${{ fromJson(vars.DEPLOY_SERVERS) }}
+    steps:
+      - name: Deploy to ${{ matrix.server }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ matrix.server }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd ${{ vars.INSTALL_PATH }}
+            echo "[deploy] Pulling latest from ${{ env.DEPLOY_BRANCH }}..."
+            git fetch origin ${{ env.DEPLOY_BRANCH }}
+            git reset --hard origin/${{ env.DEPLOY_BRANCH }}
+            echo "[deploy] Running setup update..."
+            bash setup.sh update
+            echo "[deploy] ✅ Done!"

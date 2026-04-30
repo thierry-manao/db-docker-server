@@ -1,0 +1,34 @@
+name: Deploy to servers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DEPLOY_BRANCH: main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        server: ${{ fromJson(vars.DEPLOY_SERVERS) }}
+    steps:
+      - name: Deploy to ${{ matrix.server }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ matrix.server }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd ${{ vars.INSTALL_PATH }}
+            echo "[deploy] Pulling latest from ${{ env.DEPLOY_BRANCH }}..."
+            git fetch origin ${{ env.DEPLOY_BRANCH }}
+            git reset --hard origin/${{ env.DEPLOY_BRANCH }}
+            echo "[deploy] Running setup update..."
+            bash setup.sh update
+            echo "[deploy] ✅ Done!"
