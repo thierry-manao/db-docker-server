@@ -60,6 +60,15 @@ export default function App() {
     return () => clearInterval(interval);
   }, [user, refresh]);
 
+  useEffect(() => {
+    if (!user) return;
+    // Send an immediate heartbeat then every 30 s so the superadmin
+    // can see who actually has the app open (real-time presence).
+    api.heartbeat().catch(() => {});
+    const interval = setInterval(() => api.heartbeat().catch(() => {}), 30000);
+    return () => clearInterval(interval);
+  }, [user]);
+
   const handleLogin = async (username, password) => {
     const data = await api.login(username, password);
     setUser({ username: data.username, role: data.role });

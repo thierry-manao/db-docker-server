@@ -70,6 +70,10 @@ export const api = {
       .then(r => r.json().then(d => r.ok ? d : Promise.reject(new Error(d.error || `HTTP ${r.status}`))));
   },
 
+  // Online users (superadmin only)
+  onlineUsers: () => request('/api/online-users'),
+  heartbeat: () => request('/api/heartbeat', { method: 'POST' }),
+
   // Admin user management
   listAdmins: () => request('/api/admins'),
   createAdminUser: (username, password, role) => request('/api/admins', { method: 'POST', body: JSON.stringify({ username, password, role }) }),

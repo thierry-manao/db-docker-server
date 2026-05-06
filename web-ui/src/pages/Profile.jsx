@@ -26,6 +26,7 @@ export default function Profile() {
   // Admin management
   const [admins, setAdmins] = useState([]);
   const [adminsLoading, setAdminsLoading] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState([]);
 
   // Modals
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -43,8 +44,9 @@ export default function Profile() {
   const loadAdmins = useCallback(async () => {
     setAdminsLoading(true);
     try {
-      const data = await api.listAdmins();
-      setAdmins(data.admins || []);
+      const [adminData, onlineData] = await Promise.all([api.listAdmins(), api.onlineUsers()]);
+      setAdmins(adminData.admins || []);
+      setOnlineUsers(onlineData.online || []);
     } catch (err) {
       toast('Erreur chargement admins: ' + err.message, 'danger');
     } finally {
@@ -186,6 +188,11 @@ export default function Profile() {
                     <tr key={a.id}>
                       <td className="text-sm">
                         <div className="flex items-center gap-2">
+                          {onlineUsers.includes(a.username) ? (
+                            <span title="Connecté" style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', display: 'inline-block', flexShrink: 0 }} />
+                          ) : (
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--ink-secondary)', display: 'inline-block', flexShrink: 0, opacity: 0.35 }} />
+                          )}
                           <User size={13} className="text-muted" />
                           <span className="font-semibold">{a.username}</span>
                           {isSelf && <span className="text-xs text-muted">(vous)</span>}

@@ -238,6 +238,7 @@ async function completeSetup() {
 const SESSION_COOKIE = 'dbserver_ui_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const sessions = new Map();
+const lastSeen = new Map(); // username -> timestamp (heartbeat)
 
 const MIME_TYPES = {
     '.css': 'text/css; charset=utf-8',
@@ -1109,6 +1110,30 @@ async function handleRequest(req, res) {
             await updateAdminPassword(id, newPassword);
             return sendJson(res, 200, { ok: true, message: 'Password updated.' });
         } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // ── Heartbeat (any authenticated user) ────────────────────────────────
+
+    if (req.method === 'POST' && url.pathname === '/api/heartbeat') {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        lastSeen.set(session.username, Date.now());
+        return sendJson(res, 200, { ok: true });
+    }
+
+    // ── Online users (superadmin only) ──────────────────────────────────────
+
+    if (req.method === 'GET' && url.pathname === '/api/online-users') {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        if (session.role !== 'superadmin') return sendJson(res, 403, { error: 'Superadmin access required.' });
+        const ONLINE_THRESHOLD_MS = 60 * 1000; // 60 s
+        const cutoff = Date.now() - ONLINE_THRESHOLD_MS;
+        const onlineUsernames = [];
+        for (const [username, ts] of lastSeen.entries()) {
+            if (ts > cutoff) onlineUsernames.push(username);
+        }
+        return sendJson(res, 200, { online: onlineUsernames });
     }
 
     // --- Public API (allow ocompose to fetch instances) ---
