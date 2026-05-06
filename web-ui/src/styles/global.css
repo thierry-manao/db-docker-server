@@ -230,6 +230,29 @@ body {
 .modal-footer { padding: 1rem 1.5rem; border-top: 1px solid var(--panel-border); display: flex; gap: 0.5rem; justify-content: flex-end; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
+/* Right-side profile drawer */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.25);
+  z-index: 100;
+  animation: fadeIn 0.15s ease;
+}
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 300px;
+  background: var(--panel);
+  box-shadow: -8px 0 32px rgba(0,0,0,0.12);
+  display: flex;
+  flex-direction: column;
+  animation: slideInRight 0.2s ease;
+  z-index: 101;
+}
+@keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
 /* Stat cards */
 .stat-value { font-size: 2rem; font-weight: 700; line-height: 1; }
 .stat-label { font-size: 0.7rem; color: var(--ink-secondary); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.3rem; }

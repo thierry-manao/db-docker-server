@@ -37,6 +37,57 @@ function UserAvatar({ username, avatarKey, size = 32 }) {
   );
 }
 
+function ProfileDrawer({ admin, isOnline, onClose }) {
+  return (
+    <>
+      <div className="drawer-overlay" onClick={onClose} />
+      <div className="drawer">
+        <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--panel-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span className="text-sm font-semibold">Profil</span>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '2rem 1.5rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.25rem' }}>
+          {/* Avatar */}
+          <div style={{ position: 'relative' }}>
+            <UserAvatar username={admin.username} avatarKey={admin.avatar_key} size={80} />
+            {isOnline !== undefined && (
+              <span title={isOnline ? 'Connecté' : 'Hors ligne'} style={{
+                position: 'absolute', bottom: 4, right: 4,
+                width: 13, height: 13, borderRadius: '50%',
+                background: isOnline ? 'var(--success)' : 'var(--ink-secondary)',
+                border: '2px solid var(--panel)',
+                opacity: isOnline ? 1 : 0.45,
+              }} />
+            )}
+          </div>
+          {/* Name */}
+          <div style={{ textAlign: 'center' }}>
+            <div className="font-semibold" style={{ fontSize: '1.05rem' }}>{admin.username}</div>
+            <span className="badge" style={{ fontSize: 11, marginTop: 6 }}>
+              {admin.role === 'superadmin' && <Crown size={11} style={{ display: 'inline', verticalAlign: -1, marginRight: 3 }} />}
+              {admin.role}
+            </span>
+          </div>
+          {/* Details */}
+          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: '0.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.75rem', background: 'var(--bg)', borderRadius: 'var(--radius)', fontSize: '0.8rem' }}>
+              <span className="text-muted">Statut</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 500 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: isOnline ? 'var(--success)' : 'var(--ink-secondary)', display: 'inline-block', opacity: isOnline ? 1 : 0.45 }} />
+                {isOnline ? 'Connecté' : 'Hors ligne'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.75rem', background: 'var(--bg)', borderRadius: 'var(--radius)', fontSize: '0.8rem' }}>
+              <span className="text-muted">Membre depuis</span>
+              <span style={{ fontWeight: 500 }}>{new Date(admin.created_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function Profile() {
   const { user, toast, handleLogout } = useApp();
   const navigate = useNavigate();
@@ -52,6 +103,7 @@ export default function Profile() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [resetTarget, setResetTarget] = useState(null);
   const [roleTarget, setRoleTarget] = useState(null);
+  const [previewTarget, setPreviewTarget] = useState(null);
 
   // Forms
   const [pwForm, setPwForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '', username: '' });
@@ -276,7 +328,7 @@ export default function Profile() {
                 {admins.map((a) => {
                   const isSelf = a.username === user?.username;
                   return (
-                    <tr key={a.id}>
+                    <tr key={a.id} style={{ cursor: 'pointer' }} onClick={() => setPreviewTarget(a)}>
                       <td className="text-sm">
                         <div className="flex items-center gap-2">
                           {isSuperadmin && (
@@ -301,7 +353,7 @@ export default function Profile() {
                       {isSuperadmin && (
                         <td style={{ textAlign: 'right' }}>
                           {!isSelf && (
-                            <div className="flex gap-1 justify-end">
+                            <div className="flex gap-1 justify-end" onClick={(e) => e.stopPropagation()}>
                               <button className="btn btn-ghost btn-icon" title="Changer le rôle"
                                 onClick={() => setRoleTarget(a)}>
                                 <Pencil size={14} />
@@ -441,6 +493,15 @@ export default function Profile() {
             </button>
           </div>
         </Modal>
+      )}
+
+      {/* Profile preview drawer */}
+      {previewTarget && (
+        <ProfileDrawer
+          admin={previewTarget}
+          isOnline={isSuperadmin ? onlineUsers.includes(previewTarget.username) : undefined}
+          onClose={() => setPreviewTarget(null)}
+        />
       )}
     </div>
   );

@@ -1,7 +1,27 @@
+import { useState } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../App';
-import { Database, LayoutDashboard, Network, Sun, Moon, LogOut, RefreshCw, Plus, Shield, CloudCog } from 'lucide-react';
+import { Database, LayoutDashboard, Network, Sun, Moon, LogOut, RefreshCw, Plus, Shield, CloudCog, User } from 'lucide-react';
 import TaskTracker from './TaskTracker';
+
+function SidebarAvatar({ username, size = 26 }) {
+  const [err, setErr] = useState(false);
+  if (!err) {
+    return (
+      <img
+        src={`/api/profile/avatar/${encodeURIComponent(username)}`}
+        alt={username}
+        style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }}
+        onError={() => setErr(true)}
+      />
+    );
+  }
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+      <User size={Math.round(size * 0.55)} style={{ color: 'white' }} />
+    </div>
+  );
+}
 
 export default function Layout() {
   const { user, instances, refresh, toast, theme, setTheme, handleLogout } = useApp();
@@ -64,11 +84,12 @@ export default function Layout() {
         </nav>
 
         <div style={{ padding: '0.75rem 1rem', borderTop: '1px solid var(--panel-border)' }}>
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted" style={{ cursor: 'pointer' }} onClick={() => navigate('/profile')} title="Profil">
-              <Shield size={12} style={{ display: 'inline', verticalAlign: -2, marginRight: 4 }} />{user?.username}
-            </span>
-            <div className="flex gap-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2" style={{ cursor: 'pointer', minWidth: 0 }} onClick={() => navigate('/profile')} title="Profil">
+              <SidebarAvatar username={user?.username} size={26} />
+              <span className="text-xs text-muted truncate">{user?.username}</span>
+            </div>
+            <div className="flex gap-1" style={{ flexShrink: 0 }}>
               <button className="btn btn-ghost btn-icon" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} title="Thème">
                 {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
               </button>
