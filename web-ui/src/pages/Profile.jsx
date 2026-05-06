@@ -44,15 +44,17 @@ export default function Profile() {
   const loadAdmins = useCallback(async () => {
     setAdminsLoading(true);
     try {
-      const [adminData, onlineData] = await Promise.all([api.listAdmins(), api.onlineUsers()]);
+      const requests = [api.listAdmins()];
+      if (isSuperadmin) requests.push(api.onlineUsers());
+      const [adminData, onlineData] = await Promise.all(requests);
       setAdmins(adminData.admins || []);
-      setOnlineUsers(onlineData.online || []);
+      if (onlineData) setOnlineUsers(onlineData.online || []);
     } catch (err) {
       toast('Erreur chargement admins: ' + err.message, 'danger');
     } finally {
       setAdminsLoading(false);
     }
-  }, [toast]);
+  }, [toast, isSuperadmin]);
 
   useEffect(() => { loadAdmins(); }, [loadAdmins]);
 
@@ -159,16 +161,17 @@ export default function Profile() {
       </div>
 
       {/* Admin management table */}
-      {isSuperadmin && (
-        <div className="card card-body">
+      <div className="card card-body">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-semibold">
               <Shield size={16} style={{ display: 'inline', verticalAlign: -3, marginRight: 6 }} />
               Administrateurs
             </h3>
-            <button className="btn btn-primary btn-sm" onClick={() => setShowCreateModal(true)}>
-              <UserPlus size={14} /> Ajouter
-            </button>
+            {isSuperadmin && (
+              <button className="btn btn-primary btn-sm" onClick={() => setShowCreateModal(true)}>
+                <UserPlus size={14} /> Ajouter
+              </button>
+            )}
           </div>
 
           {adminsLoading ? <div className="spinner" /> : (
@@ -178,7 +181,7 @@ export default function Profile() {
                   <th className="text-xs">Utilisateur</th>
                   <th className="text-xs">Rôle</th>
                   <th className="text-xs">Créé le</th>
-                  <th className="text-xs" style={{ textAlign: 'right' }}>Actions</th>
+                  {isSuperadmin && <th className="text-xs" style={{ textAlign: 'right' }}>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -188,10 +191,12 @@ export default function Profile() {
                     <tr key={a.id}>
                       <td className="text-sm">
                         <div className="flex items-center gap-2">
-                          {onlineUsers.includes(a.username) ? (
-                            <span title="Connecté" style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', display: 'inline-block', flexShrink: 0 }} />
-                          ) : (
-                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--ink-secondary)', display: 'inline-block', flexShrink: 0, opacity: 0.35 }} />
+                          {isSuperadmin && (
+                            onlineUsers.includes(a.username) ? (
+                              <span title="Connecté" style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', display: 'inline-block', flexShrink: 0 }} />
+                            ) : (
+                              <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--ink-secondary)', display: 'inline-block', flexShrink: 0, opacity: 0.35 }} />
+                            )
                           )}
                           <User size={13} className="text-muted" />
                           <span className="font-semibold">{a.username}</span>
@@ -205,24 +210,26 @@ export default function Profile() {
                         </span>
                       </td>
                       <td className="text-xs text-muted">{new Date(a.created_at).toLocaleDateString('fr-FR')}</td>
-                      <td style={{ textAlign: 'right' }}>
-                        {!isSelf && (
-                          <div className="flex gap-1 justify-end">
-                            <button className="btn btn-ghost btn-icon" title="Changer le rôle"
-                              onClick={() => setRoleTarget(a)}>
-                              <Pencil size={14} />
-                            </button>
-                            <button className="btn btn-ghost btn-icon" title="Réinitialiser le mot de passe"
-                              onClick={() => { setResetTarget(a); setResetPwValue(''); }}>
-                              <KeyRound size={14} />
-                            </button>
-                            <button className="btn btn-ghost btn-icon" style={{ color: 'var(--danger)' }}
-                              title="Supprimer" onClick={() => handleDeleteAdmin(a)}>
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        )}
-                      </td>
+                      {isSuperadmin && (
+                        <td style={{ textAlign: 'right' }}>
+                          {!isSelf && (
+                            <div className="flex gap-1 justify-end">
+                              <button className="btn btn-ghost btn-icon" title="Changer le rôle"
+                                onClick={() => setRoleTarget(a)}>
+                                <Pencil size={14} />
+                              </button>
+                              <button className="btn btn-ghost btn-icon" title="Réinitialiser le mot de passe"
+                                onClick={() => { setResetTarget(a); setResetPwValue(''); }}>
+                                <KeyRound size={14} />
+                              </button>
+                              <button className="btn btn-ghost btn-icon" style={{ color: 'var(--danger)' }}
+                                title="Supprimer" onClick={() => handleDeleteAdmin(a)}>
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -230,7 +237,6 @@ export default function Profile() {
             </table>
           )}
         </div>
-      )}
 
       {/* Change password modal */}
       {showPasswordModal && (

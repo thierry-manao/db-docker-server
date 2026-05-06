@@ -94,9 +94,11 @@ export default function Layout() {
           </div>
           <div className="flex items-center gap-2">
             <TaskTracker toast={toast} />
-            <button className="btn btn-outline btn-sm" onClick={refresh}>
-              <RefreshCw size={14} /> Actualiser
-            </button>
+            {location.pathname !== '/profile' && (
+              <button className="btn btn-outline btn-sm" onClick={refresh}>
+                <RefreshCw size={14} /> Actualiser
+              </button>
+            )}
           </div>
         </header>
         <div className="content">
