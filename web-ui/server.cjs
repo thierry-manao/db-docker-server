@@ -164,6 +164,7 @@ async function initDatabase() {
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )
     `);
+    await pool.query('ALTER TABLE admins ADD COLUMN IF NOT EXISTS avatar_key TEXT');
     // Migrate file-based config to DB if exists and DB is empty
     const { rows: cfgRows } = await pool.query("SELECT COUNT(*) as count FROM config");
     if (Number(cfgRows[0].count) === 0) {
@@ -194,8 +195,12 @@ async function findUserByUsername(username) {
 }
 
 async function listAdmins() {
-    const { rows } = await pool.query('SELECT id, username, role, created_at, updated_at FROM admins ORDER BY id');
+    const { rows } = await pool.query('SELECT id, username, role, avatar_key, created_at, updated_at FROM admins ORDER BY id');
     return rows;
+}
+
+async function updateAdminAvatarKey(id, key) {
+    await pool.query('UPDATE admins SET avatar_key = $1, updated_at = NOW() WHERE id = $2', [key, id]);
 }
 
 async function createAdmin(username, password, role = 'admin') {
@@ -1109,6 +1114,82 @@ async function handleRequest(req, res) {
         try {
             await updateAdminPassword(id, newPassword);
             return sendJson(res, 200, { ok: true, message: 'Password updated.' });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // ── Profile avatars ───────────────────────────────────────────────────────
+
+    // GET /api/profile/avatar/:username — serve avatar from MinIO
+    const avatarGetMatch = url.pathname.match(/^\/api\/profile\/avatar\/([a-zA-Z0-9_.-]+)$/);
+    if (req.method === 'GET' && avatarGetMatch) {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        const username = decodeURIComponent(avatarGetMatch[1]);
+        try {
+            const admin = await findUserByUsername(username);
+            if (!admin || !admin.avatar_key) return send(res, 404, 'No avatar');
+            const client = await getMinioClient();
+            if (!client) return send(res, 503, 'MinIO not configured');
+            const bucket = await ensureMinioBucket(client);
+            const ext = admin.avatar_key.split('.').pop().toLowerCase();
+            const contentType = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' }[ext] || 'application/octet-stream';
+            const stream = await new Promise((resolve, reject) =>
+                client.getObject(bucket, admin.avatar_key, (err, s) => err ? reject(err) : resolve(s))
+            );
+            res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'private, max-age=300' });
+            stream.pipe(res);
+        } catch {
+            return send(res, 404, 'Not found');
+        }
+        return;
+    }
+
+    // POST /api/profile/avatar — upload own avatar (max 2 MB, jpg/png/gif/webp)
+    if (req.method === 'POST' && url.pathname === '/api/profile/avatar') {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        const ct = req.headers['content-type'] || '';
+        const boundaryMatch = ct.match(/boundary=(.+)$/);
+        if (!boundaryMatch) return sendJson(res, 400, { error: 'Expected multipart/form-data.' });
+        const raw = await readBodyRaw(req);
+        if (raw.length > 2 * 1024 * 1024) return sendJson(res, 413, { error: 'Fichier trop grand (max 2 Mo).' });
+        const { fileName, fileData } = parseMultipart(raw, boundaryMatch[1]);
+        if (!fileName || !fileData) return sendJson(res, 400, { error: 'No file received.' });
+        const ext = fileName.split('.').pop().toLowerCase();
+        const ALLOWED_IMG = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+        if (!ALLOWED_IMG.includes(ext)) return sendJson(res, 400, { error: 'Formats autorisés : jpg, png, gif, webp.' });
+        const contentType = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' }[ext];
+        try {
+            const client = await getMinioClient();
+            if (!client) return sendJson(res, 503, { error: 'MinIO non configuré.' });
+            const bucket = await ensureMinioBucket(client);
+            const admin = await findUserByUsername(session.username);
+            if (!admin) return sendJson(res, 404, { error: 'User not found.' });
+            const newKey = `avatars/${session.username}.${ext}`;
+            if (admin.avatar_key && admin.avatar_key !== newKey) {
+                await client.removeObject(bucket, admin.avatar_key).catch(() => {});
+            }
+            await client.putObject(bucket, newKey, fileData, fileData.length, { 'Content-Type': contentType });
+            await updateAdminAvatarKey(admin.id, newKey);
+            return sendJson(res, 200, { ok: true, key: newKey });
+        } catch (err) { return sendJson(res, 500, { error: err.message }); }
+    }
+
+    // DELETE /api/profile/avatar — remove own avatar
+    if (req.method === 'DELETE' && url.pathname === '/api/profile/avatar') {
+        const session = getSession(req);
+        if (!session) return sendJson(res, 401, { error: 'Authentication required.' });
+        try {
+            const admin = await findUserByUsername(session.username);
+            if (admin?.avatar_key) {
+                const client = await getMinioClient();
+                if (client) {
+                    const bucket = await ensureMinioBucket(client);
+                    await client.removeObject(bucket, admin.avatar_key).catch(() => {});
+                }
+                await updateAdminAvatarKey(admin.id, null);
+            }
+            return sendJson(res, 200, { ok: true });
         } catch (err) { return sendJson(res, 500, { error: err.message }); }
     }
 

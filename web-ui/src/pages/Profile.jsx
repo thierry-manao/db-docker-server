@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../App';
 import { api } from '../api';
-import { Shield, User, Lock, UserPlus, Trash2, KeyRound, Crown, X, Pencil } from 'lucide-react';
+import { Shield, User, Lock, UserPlus, Trash2, KeyRound, Crown, X, Pencil, Camera } from 'lucide-react';
 
 function Modal({ title, onClose, children }) {
   return (
@@ -14,6 +14,25 @@ function Modal({ title, onClose, children }) {
         </div>
         {children}
       </div>
+    </div>
+  );
+}
+
+function UserAvatar({ username, avatarKey, size = 32 }) {
+  const [err, setErr] = useState(false);
+  if (!err && avatarKey) {
+    return (
+      <img
+        src={`/api/profile/avatar/${encodeURIComponent(username)}`}
+        alt={username}
+        style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }}
+        onError={() => setErr(true)}
+      />
+    );
+  }
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+      <User size={Math.round(size * 0.55)} style={{ color: 'white' }} />
     </div>
   );
 }
@@ -40,6 +59,44 @@ export default function Profile() {
   const [resetPwValue, setResetPwValue] = useState('');
 
   const isSuperadmin = user?.role === 'superadmin';
+
+  // Avatar
+  const fileInputRef = useRef(null);
+  const [avatarLoading, setAvatarLoading] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
+  const myAdmin = admins.find((a) => a.username === user?.username);
+  const myAvatarKey = myAdmin?.avatar_key || null;
+
+  const handleAvatarUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAvatarLoading(true);
+    setAvatarError(false);
+    try {
+      await api.uploadAvatar(file);
+      toast('Photo de profil mise à jour.');
+      loadAdmins();
+    } catch (err) {
+      toast(err.message, 'danger');
+    } finally {
+      setAvatarLoading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleAvatarDelete = async () => {
+    setAvatarLoading(true);
+    try {
+      await api.deleteAvatar();
+      toast('Photo de profil supprimée.');
+      setAvatarError(false);
+      loadAdmins();
+    } catch (err) {
+      toast(err.message, 'danger');
+    } finally {
+      setAvatarLoading(false);
+    }
+  };
 
   const loadAdmins = useCallback(async () => {
     setAdminsLoading(true);
@@ -141,11 +198,42 @@ export default function Profile() {
       <div className="card card-body mb-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <User size={20} style={{ color: 'white' }} />
+            {/* Avatar circle with upload overlay */}
+            <div style={{ position: 'relative', width: 48, height: 48, flexShrink: 0 }}>
+              {!avatarError && myAvatarKey ? (
+                <img
+                  src={`/api/profile/avatar/${encodeURIComponent(user?.username)}`}
+                  alt={user?.username}
+                  style={{ width: 48, height: 48, borderRadius: '50%', objectFit: 'cover', display: 'block' }}
+                  onError={() => setAvatarError(true)}
+                />
+              ) : (
+                <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <User size={22} style={{ color: 'white' }} />
+                </div>
+              )}
+              {/* Upload overlay */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={avatarLoading}
+                title="Changer la photo"
+                style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer', opacity: 0, transition: 'opacity 0.15s' }}
+                onMouseEnter={(e) => (e.currentTarget.style.opacity = 1)}
+                onMouseLeave={(e) => (e.currentTarget.style.opacity = 0)}
+              >
+                {avatarLoading ? <span className="spinner" style={{ width: 14, height: 14 }} /> : <Camera size={16} style={{ color: 'white' }} />}
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" style={{ display: 'none' }} onChange={handleAvatarUpload} />
             </div>
             <div>
-              <div className="text-sm font-semibold">{user?.username}</div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold">{user?.username}</span>
+                {!avatarError && myAvatarKey && (
+                  <button className="btn btn-ghost btn-icon" style={{ padding: 2 }} title="Supprimer la photo" onClick={handleAvatarDelete} disabled={avatarLoading}>
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
               <div className="flex items-center gap-2">
                 <span className="badge" style={{ fontSize: 10 }}>
                   {user?.role === 'superadmin' && <Crown size={10} style={{ display: 'inline', verticalAlign: -1, marginRight: 2 }} />}
@@ -198,7 +286,7 @@ export default function Profile() {
                               <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--ink-secondary)', display: 'inline-block', flexShrink: 0, opacity: 0.35 }} />
                             )
                           )}
-                          <User size={13} className="text-muted" />
+                          <UserAvatar username={a.username} avatarKey={a.avatar_key} size={24} />
                           <span className="font-semibold">{a.username}</span>
                           {isSelf && <span className="text-xs text-muted">(vous)</span>}
                         </div>

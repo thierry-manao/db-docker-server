@@ -74,6 +74,15 @@ export const api = {
   onlineUsers: () => request('/api/online-users'),
   heartbeat: () => request('/api/heartbeat', { method: 'POST' }),
 
+  // Avatar
+  uploadAvatar: (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return fetch('/api/profile/avatar', { method: 'POST', body: form, credentials: 'same-origin' })
+      .then(r => r.json().then(d => r.ok ? d : Promise.reject(new Error(d.error || `HTTP ${r.status}`))));
+  },
+  deleteAvatar: () => request('/api/profile/avatar', { method: 'DELETE' }),
+
   // Admin user management
   listAdmins: () => request('/api/admins'),
   createAdminUser: (username, password, role) => request('/api/admins', { method: 'POST', body: JSON.stringify({ username, password, role }) }),
