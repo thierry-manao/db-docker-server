@@ -70,7 +70,7 @@ services:
     profiles: [mariadb, mysql]
     restart: unless-stopped
     ports:
-      - "${DB_ADMIN_PORT:-28080}:80"
+      - "${DB_ADMIN_BIND:-127.0.0.1}:${DB_ADMIN_PORT:-28080}:80"
     environment:
       PMA_HOST: ${DB_ENGINE:-mariadb}
       PMA_PORT: 3306
@@ -86,7 +86,7 @@ services:
     profiles: [postgres]
     restart: unless-stopped
     ports:
-      - "${DB_ADMIN_PORT:-28080}:80"
+      - "${DB_ADMIN_BIND:-127.0.0.1}:${DB_ADMIN_PORT:-28080}:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@local.dev}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}

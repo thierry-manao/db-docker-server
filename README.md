@@ -186,7 +186,25 @@ DB_ROOT_PASSWORD=root
 DB_DATABASE=mydb
 DB_PORT=23306
 DB_ADMIN_PORT=28080
+DB_ADMIN_BIND=127.0.0.1
 ```
+
+### Admin UI access (phpMyAdmin / pgAdmin)
+
+By default the admin UI binds to **`127.0.0.1` only** (`DB_ADMIN_BIND=127.0.0.1`), so it is
+**not reachable from the network or the internet** — only from the host itself. This is the
+correct control because Docker's published ports bypass UFW; a loopback bind, not a firewall
+rule, is what keeps the port closed to the outside.
+
+To reach it from your machine, open an SSH tunnel to the instance's `DB_ADMIN_PORT`:
+
+```bash
+ssh -L 28080:127.0.0.1:28080 user@server   # then browse http://localhost:28080
+```
+
+The `Admin: http://localhost:<port>` link printed by the CLI only resolves through such a
+tunnel once `DB_ADMIN_BIND=127.0.0.1`. To allow direct access from a trusted network, set
+`DB_ADMIN_BIND` to a VPN/LAN interface IP; avoid `0.0.0.0` (exposes it to everyone).
 
 Supported engines:
 - `mariadb` — with phpMyAdmin admin UI
