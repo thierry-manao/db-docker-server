@@ -196,10 +196,18 @@ By default the admin UI binds to **`127.0.0.1` only** (`DB_ADMIN_BIND=127.0.0.1`
 correct control because Docker's published ports bypass UFW; a loopback bind, not a firewall
 rule, is what keeps the port closed to the outside.
 
-To reach it from your machine, open an SSH tunnel to the instance's `DB_ADMIN_PORT`:
+To reach it from your machine, open an SSH **tunnel** to the instance's `DB_ADMIN_PORT`.
+Use `-N` so SSH only forwards the port and does **not** open a remote shell (`-f` backgrounds it):
 
 ```bash
-ssh -L 28080:127.0.0.1:28080 user@server   # then browse http://localhost:28080
+ssh -fN -L 28080:127.0.0.1:28080 user@server   # then browse http://localhost:28080
+```
+
+For a credential that can *only* tunnel (no shell even without `-N`), restrict the key in the
+server's `~/.ssh/authorized_keys`:
+
+```
+restrict,permitopen="127.0.0.1:28080",command="echo tunnel-only" ssh-ed25519 AAAA... admin-tunnel
 ```
 
 The `Admin: http://localhost:<port>` link printed by the CLI only resolves through such a
