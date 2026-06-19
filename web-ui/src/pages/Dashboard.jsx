@@ -120,9 +120,6 @@ export default function Dashboard() {
                         <button className="btn btn-danger btn-sm" disabled={isPending} onClick={() => runAction(inst.name, 'down')}>
                           <Square size={12} /> Arrêter
                         </button>
-                        <a className="btn btn-outline btn-sm" href={`http://${window.location.hostname}:${c.DB_ADMIN_PORT}`} target="_blank" rel="noreferrer">
-                          {adminLabel}
-                        </a>
                       </>
                     ) : (
                       <button className="btn btn-success btn-sm" disabled={isPending} onClick={() => runAction(inst.name, 'up')}>
