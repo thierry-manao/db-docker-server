@@ -5,7 +5,7 @@ services:
     profiles: [mariadb]
     restart: unless-stopped
     ports:
-      - "${DB_PORT:-23306}:3306"
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-23306}:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
       MYSQL_DATABASE: ${DB_DATABASE:-}
@@ -27,7 +27,7 @@ services:
     profiles: [mysql]
     restart: unless-stopped
     ports:
-      - "${DB_PORT:-23306}:3306"
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-23306}:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
       MYSQL_DATABASE: ${DB_DATABASE:-}
@@ -49,7 +49,7 @@ services:
     profiles: [postgres]
     restart: unless-stopped
     ports:
-      - "${DB_PORT:-25432}:5432"
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-25432}:5432"
     environment:
       POSTGRES_PASSWORD: ${DB_ROOT_PASSWORD:-root}
       POSTGRES_DB: ${DB_DATABASE:-}
